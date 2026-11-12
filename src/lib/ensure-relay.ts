@@ -7,25 +7,35 @@ import { openSync } from 'fs'
  *
  * The signaling relay is an independent process on :3003/:3004. In the Docker
  * production stack it runs as its own container with `restart: unless-stopped`
- * (see docker-compose.yml), so this helper is pointless there — it is disabled
- * by setting PICO_EMBEDDED_RELAY=0 on the app service.
+ * (see docker-compose.yml), so this helper is inert there — disabled by
+ * setting PICO_EMBEDDED_RELAY=0 on the app service.
  *
- * In the sandbox preview, however, the platform only supervises the Next.js
- * dev server. If the relay process dies (or the box was recycled), every join
- * would time out with "Could not reach the call relay". The app fetches
- * /api/ice on every join anyway — so that endpoint calls this keeper, which
- * revives the relay before the socket ever tries to connect. A join right
- * after a cold boot takes a couple of seconds longer instead of failing.
+ * In the sandbox preview the platform only supervises the Next.js dev server:
+ * when the box is recycled the relay is simply gone, and every join would
+ * dead-end in "Could not reach the call relay". Two layers make that
+ * impossible:
+ *
+ *  1. startRelayKeeper() — wired through src/instrumentation.ts, it boots the
+ *     relay the moment the Next.js server starts and re-checks it every few
+ *     seconds for the whole life of the process. Self-healing with zero
+ *     traffic.
+ *  2. ensureRelayAlive(wait) — awaited by /api/ice before it responds. The
+ *     client fetches that endpoint on every join, so even if the keeper were
+ *     somehow killed, the join itself revives the relay and waits until it
+ *     actually listens before letting the browser connect.
+ *
+ * Both layers share one single-flight revival, probe real TCP connectivity
+ * (never trust "process spawned"), and never throw into the caller.
  */
 
 const RELAY_PORT = 3003
-const SPAWN_COOLDOWN_MS = 5_000
+const SPAWN_COOLDOWN_MS = 4_000
+const KEEPER_INTERVAL_MS = 10_000
 
 let lastSpawnAt = 0
-let lastAliveCheck = 0
-let aliveCache = true
+let inFlight: Promise<boolean> | null = null
 
-function probeRelay(timeoutMs = 600): Promise<boolean> {
+export function probeRelay(timeoutMs = 800): Promise<boolean> {
   return new Promise((resolve) => {
     const sock = tcpConnect({ port: RELAY_PORT, host: '127.0.0.1' })
     const done = (ok: boolean) => {
@@ -38,49 +48,90 @@ function probeRelay(timeoutMs = 600): Promise<boolean> {
   })
 }
 
-/** Fire-and-forget: make sure the relay is listening. Never throws. */
-export function ensureRelayAlive(): void {
-  void (async () => {
+async function spawnRelay(): Promise<void> {
+  const cwd = process.cwd()
+  const relayDir = `${cwd}/mini-services/signaling`
+  console.log(`[relay-keeper] relay down on :${RELAY_PORT} — reviving…`)
+  // Pin the ports explicitly: the Next.js server sets process.env.PORT for
+  // its own port, and an inherited PORT would send the relay to the wrong
+  // one (bind failure → half-dead relay).
+  let logFd: number | undefined
+  try {
+    logFd = openSync(`${relayDir}/relay.log`, 'a')
+  } catch {
+    /* logging is best-effort */
+  }
+  await new Promise<void>((resolve) => {
     try {
-      const now = Date.now()
-      // Cache the probe for 10s — /api/ice can burst on several joins.
-      if (now - lastAliveCheck > 10_000) {
-        aliveCache = await probeRelay()
-        lastAliveCheck = now
-      }
-      if (aliveCache) return
-      if (now - lastSpawnAt < SPAWN_COOLDOWN_MS) return
-      lastSpawnAt = now
-
-      const cwd = process.cwd()
-      const relayDir = `${cwd}/mini-services/signaling`
-      console.log('[ensure-relay] relay down on :3003 — reviving…')
-      // Pin the ports explicitly: the Next.js server sets process.env.PORT
-      // for its own port, and an inherited PORT would send the relay to the
-      // wrong one (bind failure → half-dead relay).
-      let logFd: number | undefined
-      try {
-        logFd = openSync(`${relayDir}/relay.log`, 'a')
-      } catch {
-        /* logging is best-effort */
-      }
       const child = spawn('bun', ['run', 'dev'], {
         cwd: relayDir,
         detached: true,
         stdio: logFd !== undefined ? ['ignore', logFd, logFd] : 'ignore',
         env: { ...process.env, PORT: '3003', INFO_PORT: '3004' },
       })
+      child.on('error', () => resolve())
       child.unref()
-      // Give it a moment, then refresh the cache so the next call sees truth.
-      setTimeout(() => {
-        void probeRelay(4000).then((ok) => {
-          aliveCache = ok
-          lastAliveCheck = Date.now()
-          console.log(`[ensure-relay] revival ${ok ? 'succeeded' : 'failed'}`)
-        })
-      }, 3_000)
     } catch {
-      /* never let a keeper break the endpoint */
+      /* fall through — the probe loop below reports the truth */
+    }
+    resolve()
+  })
+}
+
+/**
+ * Make sure the relay on :3003 is accepting connections. Resolves `true`
+ * only after a real TCP probe succeeds — spawning and waiting when needed.
+ * Concurrent callers share a single revival (single-flight), so a burst of
+ * joins during a cold boot costs exactly one spawn.
+ */
+export function ensureRelayAlive(waitMs = 9_000): Promise<boolean> {
+  if (inFlight) return inFlight
+  inFlight = (async () => {
+    try {
+      if (await probeRelay()) return true
+
+      const now = Date.now()
+      if (now - lastSpawnAt >= SPAWN_COOLDOWN_MS) {
+        lastSpawnAt = Date.now()
+        await spawnRelay()
+      }
+
+      const deadline = Date.now() + waitMs
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 300))
+        if (await probeRelay(600)) {
+          console.log('[relay-keeper] relay is up')
+          return true
+        }
+      }
+      console.log('[relay-keeper] revival failed — relay still unreachable')
+      return false
+    } catch {
+      return false
+    } finally {
+      inFlight = null
     }
   })()
+  return inFlight
+}
+
+/**
+ * Boot-time + periodic keeper. Started once per server process from
+ * src/instrumentation.ts (Node runtime only).
+ */
+export function startRelayKeeper(): void {
+  const g = globalThis as { __picoRelayKeeper?: boolean }
+  if (g.__picoRelayKeeper) return
+  g.__picoRelayKeeper = true
+
+  console.log('[relay-keeper] starting — relay will be kept alive on :3003')
+  void ensureRelayAlive(15_000)
+  const timer = setInterval(() => {
+    void (async () => {
+      if (await probeRelay(1_000)) return
+      console.log('[relay-keeper] periodic check: relay down — reviving')
+      await ensureRelayAlive(9_000)
+    })()
+  }, KEEPER_INTERVAL_MS)
+  timer.unref?.()
 }

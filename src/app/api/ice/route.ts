@@ -33,9 +33,20 @@ const noStore = { 'Cache-Control': 'no-store' } as const
 
 export async function GET() {
   // The app calls this on every join — the perfect moment to revive a relay
-  // that died (sandbox cold boots). No-op when it is healthy; disabled in the
+  // that died (sandbox cold boots). We AWAIT the keeper: the response only
+  // goes out once :3003 actually accepts connections (or the wait budget is
+  // spent), so the browser never races a relay that is still booting.
+  // No-op (a ~1ms TCP probe) when it is already healthy; disabled in the
   // Docker production stack via PICO_EMBEDDED_RELAY=0.
-  if (process.env.PICO_EMBEDDED_RELAY !== '0') ensureRelayAlive()
+  const relayUp =
+    process.env.PICO_EMBEDDED_RELAY !== '0' ? await ensureRelayAlive(8_000) : true
+
+  if (!relayUp) {
+    return NextResponse.json(
+      { error: 'relay-unreachable', iceServers: STUN_SERVERS, ttl: 30 },
+      { status: 503, headers: noStore },
+    )
+  }
 
   const urls = (process.env.TURN_URLS ?? '')
     .split(',')
@@ -44,7 +55,7 @@ export async function GET() {
 
   if (urls.length === 0) {
     return NextResponse.json(
-      { iceServers: STUN_SERVERS, ttl: 3600 },
+      { iceServers: STUN_SERVERS, ttl: 3600, relay: true },
       { headers: noStore },
     )
   }
@@ -62,7 +73,7 @@ export async function GET() {
   if (!username || !credential) {
     // Misconfigured TURN is worse than none — fail closed to STUN-only.
     return NextResponse.json(
-      { iceServers: STUN_SERVERS, ttl: 3600 },
+      { iceServers: STUN_SERVERS, ttl: 3600, relay: true },
       { headers: noStore },
     )
   }
@@ -71,6 +82,7 @@ export async function GET() {
     {
       iceServers: [...STUN_SERVERS, { urls, username, credential }],
       ttl: 3600,
+      relay: true,
     },
     { headers: noStore },
   )

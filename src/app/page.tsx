@@ -26,6 +26,13 @@ function PicoApp() {
 
   const previewRef = useRef<MediaStream | null>(null)
 
+  // Cold-boot pre-warm: asking for ICE also wakes the signaling relay
+  // server-side, so the relay is listening long before a user can reach the
+  // join button. Cheap no-op when it is already healthy.
+  useEffect(() => {
+    fetch('/api/ice', { cache: 'no-store' }).catch(() => {})
+  }, [])
+
   // URL drives the room so invite links work; keep state in sync on back/forward
   useEffect(() => {
     if (!urlRoom) return

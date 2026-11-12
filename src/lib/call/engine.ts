@@ -50,11 +50,13 @@ const ICE_SERVERS: RTCIceServer[] = [
 const ICE_CACHE_TTL_MS = 3_600_000
 let iceCache: { servers: RTCIceServer[]; at: number } | null = null
 
-async function fetchIceServers(): Promise<RTCIceServer[]> {
-  if (iceCache && Date.now() - iceCache.at < ICE_CACHE_TTL_MS) return iceCache.servers
+async function fetchIceServers(force = false): Promise<RTCIceServer[]> {
+  if (!force && iceCache && Date.now() - iceCache.at < ICE_CACHE_TTL_MS) return iceCache.servers
   try {
     const ctrl = new AbortController()
-    const timer = window.setTimeout(() => ctrl.abort(), 4000)
+    // Generous budget: during a cold boot the endpoint waits for the relay
+    // keeper to finish reviving before it answers at all.
+    const timer = window.setTimeout(() => ctrl.abort(), 10_000)
     const res = await fetch('/api/ice', { signal: ctrl.signal, cache: 'no-store' })
     window.clearTimeout(timer)
     if (res.ok) {
@@ -210,6 +212,68 @@ export class CallEngine {
   private passwordHash = ''
   private iceServers: RTCIceServer[] = ICE_SERVERS
 
+  /**
+   * Create the signaling socket and resolve only once it is actually live.
+   *
+   * Polling-first is deliberate: the initial handshake rides plain HTTP,
+   * which survives every proxy, VPN and captive portal on the planet, then
+   * socket.io transparently upgrades to websocket. Websocket-first dead-ends
+   * behind proxies that block or hang upgrades — there is no downgrade path.
+   *
+   * /api/ice (fetched just above) also wakes the relay server-side before it
+   * answers, so a relay lost to a recycled box is usually alive again before
+   * this handshake even starts. If it still fails, start() retries once
+   * before surfacing an error — a transient outage never becomes a dead end.
+   */
+  private async connectSignaling(forceIce: boolean): Promise<Socket> {
+    this.iceServers = await fetchIceServers(forceIce)
+    const socket = io(SIGNALING_URL, {
+      path: SOCKET_PATH,
+      transports: ['polling', 'websocket'],
+      upgrade: true,
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 4000,
+      timeout: 10000,
+    })
+    this.socket = socket
+    // Dev/debug handle (harmless in prod, invaluable for live diagnostics)
+    if (typeof window !== 'undefined') {
+      ;(window as unknown as { __pico?: unknown }).__pico = { engine: this, socket }
+    }
+    socket.on('connect', () => {
+      useCallStore.getState().setSignalingConnected(true)
+      if (this.myId) this.rejoin()
+    })
+    socket.on('disconnect', () => useCallStore.getState().setSignalingConnected(false))
+    socket.on('connect_error', () => useCallStore.getState().setSignalingConnected(false))
+
+    // Gate on the first real connect. The temporary listeners are removed
+    // once settled so they can never kill socket.io's own reconnection loop
+    // on a later mid-call hiccup.
+    await new Promise<void>((resolve, reject) => {
+      let guard = 0
+      const finish = (ok: boolean) => {
+        window.clearTimeout(guard)
+        socket.off('connect', onOk)
+        socket.off('connect_error', onFail)
+        if (ok) {
+          resolve()
+          return
+        }
+        socket.disconnect()
+        reject(new Error('relay unreachable'))
+      }
+      const onOk = () => finish(true)
+      const onFail = () => finish(false)
+      guard = window.setTimeout(onFail, 9_000)
+      socket.once('connect', onOk)
+      socket.once('connect_error', onFail)
+    })
+    return socket
+  }
+
   /* listen together */
   private musicSource: MusicSource | null = null
   private musicHandleStop: (() => void) | null = null
@@ -236,35 +300,25 @@ export class CallEngine {
     store.setPreset(opts.preset)
     store.setEffectiveLabel(this.effectiveLabel())
 
-    // ---- ICE (TURN/STUN) — resolved before any peer connection is built ----
-    this.iceServers = await fetchIceServers()
-
-    // ---- Signaling ----
-    // Polling-first is deliberate: the initial handshake rides plain HTTP,
-    // which survives every proxy, VPN and captive portal on the planet, then
-    // socket.io transparently upgrades to websocket. Websocket-first dead-ends
-    // behind proxies that block or hang upgrades — there is no downgrade path.
-    const socket = io(SIGNALING_URL, {
-      path: SOCKET_PATH,
-      transports: ['polling', 'websocket'],
-      upgrade: true,
-      reconnection: true,
-      reconnectionAttempts: Infinity,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 4000,
-      timeout: 10000,
-    })
-    this.socket = socket
-    // Dev/debug handle (harmless in prod, invaluable for live diagnostics)
-    if (typeof window !== 'undefined') {
-      ;(window as unknown as { __pico?: unknown }).__pico = { engine: this, socket }
+    // ---- ICE + Signaling ----
+    // /api/ice hands out TURN/STUN *and* (server-side) waits for the relay to
+    // listen before it answers; connectSignaling() then resolves only once the
+    // socket is genuinely connected. A relay lost to a recycled box / dev
+    // restart heals right here — one controlled retry, invisible to the user.
+    let socket: Socket
+    try {
+      socket = await this.connectSignaling(false)
+    } catch {
+      // Second and last attempt: the keeper has now been nudged twice
+      // server-side; give it a breath, force-refresh ICE, reconnect fresh.
+      await new Promise((r) => setTimeout(r, 1_200))
+      try {
+        socket = await this.connectSignaling(true)
+      } catch {
+        await this.cleanupAfterFailedJoin()
+        throw new Error('Could not reach the call relay. Check your connection and try again.')
+      }
     }
-    socket.on('connect', () => {
-      useCallStore.getState().setSignalingConnected(true)
-      if (this.myId) this.rejoin()
-    })
-    socket.on('disconnect', () => useCallStore.getState().setSignalingConnected(false))
-    socket.on('connect_error', () => useCallStore.getState().setSignalingConnected(false))
 
     // ---- Local media ----
     this.localStream = opts.initialStream ?? null

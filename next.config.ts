@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // src/instrumentation.ts keeps the signaling relay alive (see that file).
   output: "standalone",
   typescript: {
     // Production builds must fail on type errors — never ship silently broken.
