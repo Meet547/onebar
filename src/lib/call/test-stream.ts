@@ -96,3 +96,46 @@ export async function createTestStream(): Promise<MediaStream> {
   }
   return stream
 }
+
+/**
+ * Synthetic display capture for test mode — a flat, animated "slide" that
+ * makes it obvious on the receiving side that screen sharing works.
+ */
+export async function createTestScreenStream(): Promise<MediaStream> {
+  const canvas = document.createElement('canvas')
+  canvas.width = 960
+  canvas.height = 540
+  const ctx = canvas.getContext('2d')!
+
+  const draw = () => {
+    const t = Date.now() / 1000
+    ctx.fillStyle = '#0d0d0f'
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+
+    // flat slide: heading, body lines, a moving progress bar
+    ctx.fillStyle = '#ffffff'
+    ctx.font = '700 44px Manrope, -apple-system, system-ui, sans-serif'
+    ctx.textAlign = 'left'
+    ctx.fillText('Shared screen — Pico', 64, 110)
+    ctx.fillStyle = 'rgba(255,255,255,0.35)'
+    ctx.font = '500 22px Manrope, sans-serif'
+    for (let i = 0; i < 4; i++) {
+      ctx.fillRect(64, 170 + i * 44, 460 - i * 60, 14)
+    }
+    const w = 300 + Math.sin(t * 1.4) * 150
+    ctx.fillStyle = '#30d158'
+    ctx.fillRect(64, 420, w, 18)
+    ctx.fillStyle = 'rgba(255,255,255,0.55)'
+    ctx.font = '500 18px Geist Mono, monospace'
+    ctx.fillText(new Date().toLocaleTimeString(), 64, 490)
+  }
+  draw()
+  const timer = window.setInterval(draw, 100)
+  const stream = canvas.captureStream(10)
+  ;(stream as MediaStream & { __stop?: () => void }).__stop = () => {
+    window.clearInterval(timer)
+  }
+  // Small delay so the caller's spinner state is realistic
+  await new Promise((r) => setTimeout(r, 150))
+  return stream
+}

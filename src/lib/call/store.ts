@@ -1,7 +1,8 @@
 'use client'
 
 import { create } from 'zustand'
-import type { ChatMessage, NetworkLevel, PeerState, QualityPreset } from './types'
+import type { ChatMessage, MusicState, NetworkLevel, PeerState, QualityPreset } from './types'
+import { INITIAL_MUSIC } from './types'
 
 /**
  * MediaStream registry — deliberately OUTSIDE React state.
@@ -36,6 +37,16 @@ interface CallStore {
   overallLevel: NetworkLevel
   bitrateKbps: number
   spotlight: string | null // peer id (or 'self') that is sharing a screen
+  /** Socket id of the meeting host — null until the server confirms. */
+  hostId: string | null
+  /** True when the host locked the call (no new joins). */
+  locked: boolean
+  /** True when the room was created with a passcode. */
+  passcodeProtected: boolean
+  /** Set when the host removed us — page-level banner + bounce to home. */
+  kicked: boolean
+  /** Listen-together state (one music session per room). */
+  music: MusicState
 
   setSignalingConnected: (v: boolean) => void
   setSelf: (partial: Partial<SelfState>) => void
@@ -50,6 +61,11 @@ interface CallStore {
   setEffectiveLabel: (l: string) => void
   setOverallLevel: (l: NetworkLevel) => void
   setSpotlight: (id: string | null) => void
+  setHostId: (id: string | null) => void
+  setLocked: (v: boolean) => void
+  setPasscodeProtected: (v: boolean) => void
+  setKicked: (v: boolean) => void
+  setMusic: (partial: Partial<MusicState>) => void
   reset: () => void
 }
 
@@ -66,6 +82,11 @@ export const useCallStore = create<CallStore>((set, get) => ({
   overallLevel: 3,
   bitrateKbps: 0,
   spotlight: null,
+  hostId: null,
+  locked: false,
+  passcodeProtected: false,
+  kicked: false,
+  music: INITIAL_MUSIC,
 
   setSignalingConnected: (v) => set({ signalingConnected: v }),
   setSelf: (partial) => set((s) => ({ self: { ...s.self, ...partial } })),
@@ -109,6 +130,11 @@ export const useCallStore = create<CallStore>((set, get) => ({
   setEffectiveLabel: (l) => set({ effectiveLabel: l }),
   setOverallLevel: (l) => set({ overallLevel: l }),
   setSpotlight: (id) => set({ spotlight: id }),
+  setHostId: (id) => set({ hostId: id }),
+  setLocked: (v) => set({ locked: v }),
+  setPasscodeProtected: (v) => set({ passcodeProtected: v }),
+  setKicked: (v) => set({ kicked: v }),
+  setMusic: (partial) => set((s) => ({ music: { ...s.music, ...partial } })),
   reset: () =>
     set({
       signalingConnected: false,
@@ -119,5 +145,10 @@ export const useCallStore = create<CallStore>((set, get) => ({
       overallLevel: 3,
       bitrateKbps: 0,
       spotlight: null,
+      hostId: null,
+      locked: false,
+      passcodeProtected: false,
+      kicked: false,
+      music: INITIAL_MUSIC,
     }),
 }))

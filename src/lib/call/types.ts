@@ -13,6 +13,58 @@ export interface PeerState {
   streamVersion: number
 }
 
+/* ---------------- music (listen together) ---------------- */
+
+/** Extra audio sent when "Listen together" is on — Opus stereo, well above speech quality. */
+export const MUSIC_BITRATE = 96_000
+/** Music bitrate steps down with the network instead of fighting it. */
+export const MUSIC_BITRATE_BY_LEVEL: Record<NetworkLevel, number> = {
+  0: 48_000,
+  1: 64_000,
+  2: 96_000,
+  3: 96_000,
+}
+
+export interface MusicState {
+  /** Peer id of whoever is sharing music (null = nobody). */
+  peerId: string | null
+  title: string
+  playing: boolean
+  /** Seconds into the track at the time of the last broadcast. */
+  position: number
+  duration: number
+}
+
+export const INITIAL_MUSIC: MusicState = {
+  peerId: null,
+  title: '',
+  playing: false,
+  position: 0,
+  duration: 0,
+}
+
+/* ---------------- passcode gate ---------------- */
+
+/**
+ * Small, fast, dependency-free hash used ONLY as a room entry gate on the
+ * signaling relay. Media security does not depend on it: every packet is
+ * already encrypted with DTLS-SRTP by the browser.
+ */
+export function hashPasscode(code: string): string {
+  const s = code.trim().toLowerCase()
+  let h1 = 0xdeadbeef
+  let h2 = 0x41c6ce57
+  for (let i = 0; i < s.length; i++) {
+    const ch = s.charCodeAt(i)
+    h1 = Math.imul(h1 ^ ch, 2654435761)
+    h2 = Math.imul(h2 ^ ch, 1597334677)
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909)
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909)
+  const v = 4294967296 * (2097151 & h2) + (h1 >>> 0)
+  return v.toString(16)
+}
+
 export interface ChatMessage {
   id: string
   from: string

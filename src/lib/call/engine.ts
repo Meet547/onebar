@@ -1,11 +1,16 @@
 'use client'
 
 import { io, type Socket } from 'socket.io-client'
+import { toast } from 'sonner'
 import { useCallStore, setStream as putStream } from './store'
-import { createTestStream } from './test-stream'
+import { createTestStream, createTestScreenStream } from './test-stream'
 import { clearAllAudio, trackAudio } from './audio-levels'
+import { attachRemoteMusic, detachRemoteMusic } from './music'
 import {
   LINK_CAPS,
+  MUSIC_BITRATE,
+  MUSIC_BITRATE_BY_LEVEL,
+  INITIAL_MUSIC,
   QUALITY_PROFILES,
   type NetworkLevel,
   type QualityPreset,
@@ -46,33 +51,86 @@ export interface StartOptions {
   /** Preview stream acquired on the pre-join screen, reused to avoid opening the camera twice. */
   initialStream?: MediaStream | null
   testMode?: boolean
+  /** Hashed room passcode (see hashPasscode) — required when the room is protected. */
+  passwordHash?: string
 }
 
 interface LinkInfo {
   lastCap: number | null
 }
 
+/** Everything the engine needs from a live music source. Optional control
+ *  hooks exist only for element-backed sources (files), not raw tracks. */
+export interface MusicSource {
+  stream: MediaStream
+  title: string
+  duration: number
+  getPosition(): number
+  isPlaying(): boolean
+  play?(): Promise<void>
+  pause?(): void
+  seek?(t: number): void
+  setMonitorVolume?(v: number): void
+  stop?(): void
+}
+
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
 /* ------------------------------------------------------------------ */
 
-/** Add Opus DTX + low bitrate cap to SDP — near-zero cost for silence. */
-function mungeOpus(sdp: string): string {
+/**
+ * Opus tuning per m-section. Speech sections get DTX + a 24 kbps ceiling so
+ * silence costs (almost) nothing; music sections get stereo and a high
+ * ceiling. Sections are recognized by their msid (local sends) or by mid
+ * (recvonly answers, where the msid lives in the remote offer).
+ */
+function mungeOpus(sdp: string, musicIds: Set<string>, musicMids: Set<string>): string {
   const lines = sdp.split('\r\n')
+  const mIdx: number[] = []
+  lines.forEach((l, i) => {
+    if (l.startsWith('m=')) mIdx.push(i)
+  })
+  mIdx.push(lines.length)
+
+  const sectionMusic = new Array<boolean>(lines.length).fill(false)
+  for (let s = 0; s < mIdx.length - 1; s++) {
+    const from = mIdx[s]
+    const to = mIdx[s + 1]
+    let music = false
+    for (let i = from; i < to; i++) {
+      const msid = lines[i].match(/^a=msid:(\S+)/)
+      if (msid && musicIds.has(msid[1])) {
+        music = true
+        break
+      }
+      const mid = lines[i].match(/^a=mid:(.+)$/)
+      if (mid && musicMids.has(mid[1].trim())) {
+        music = true
+        break
+      }
+    }
+    for (let i = from; i < to; i++) sectionMusic[i] = music
+  }
+
   const opusPTs = new Set<string>()
   for (const line of lines) {
     const m = line.match(/^a=rtpmap:(\d+) opus\/48000/i)
     if (m) opusPTs.add(m[1])
   }
-  const out = lines.map((line) => {
+
+  const out = lines.map((line, i) => {
     const m = line.match(/^a=fmtp:(\d+)(.*)$/)
-    if (m && opusPTs.has(m[1])) {
-      let params = m[2] ?? ''
+    if (!m || !opusPTs.has(m[1])) return line
+    let params = m[2] ?? ''
+    if (sectionMusic[i]) {
+      params = params.replace(/;?(usedtx|maxaveragebitrate|stereo)=[^;]*/gi, '')
+      params += ';stereo=1;maxaveragebitrate=128000'
+    } else {
+      params = params.replace(/;?(stereo|maxaveragebitrate)=[^;]*/gi, '')
       if (!/usedtx/i.test(params)) params += ';usedtx=1'
       if (!/maxaveragebitrate/i.test(params)) params += ';maxaveragebitrate=24000'
-      return `a=fmtp:${m[1]}${params}`
     }
-    return line
+    return `a=fmtp:${m[1]}${params}`
   })
   return out.join('\r\n')
 }
@@ -99,7 +157,7 @@ export class CallEngine {
   private micTrack: MediaStreamTrack | null = null
   private screenTrack: MediaStreamTrack | null = null
   private pcs = new Map<string, RTCPeerConnection>()
-  private sendersMap = new Map<string, { audio?: RTCRtpSender; video?: RTCRtpSender }>()
+  private sendersMap = new Map<string, { audio?: RTCRtpSender; video?: RTCRtpSender; music?: RTCRtpSender }>()
   private pendingIce = new Map<string, RTCIceCandidateInit[]>()
   private links = new Map<string, LinkInfo>()
   private statsTimer: number | null = null
@@ -113,6 +171,19 @@ export class CallEngine {
   private testMode = false
   private mediaMode: MediaMode = 'full'
   private prevBytes = new Map<string, number>()
+  private passwordHash = ''
+
+  /* listen together */
+  private musicSource: MusicSource | null = null
+  private musicHandleStop: (() => void) | null = null
+  private musicUnsub: (() => void) | null = null
+  private musicMetaTimer: number | null = null
+  private musicStreamId = ''
+  private musicOrigin: 'file' | 'test' | 'tab' = 'file'
+  private lastMusicBitrate = 0
+  private remoteMusicStreamIds = new Set<string>()
+  private musicMids = new Set<string>()
+  private lastRemoteSdp = ''
 
   async start(opts: StartOptions): Promise<{ mode: MediaMode }> {
     if (this.started) await this.leave(true)
@@ -121,6 +192,7 @@ export class CallEngine {
     this.preset = opts.preset
     this.adaptiveProfile = opts.preset === 'auto' ? 'balanced' : opts.preset
     this.testMode = !!opts.testMode
+    this.passwordHash = opts.passwordHash ?? ''
 
     const store = useCallStore.getState()
     store.setSelf({ name: opts.name })
@@ -166,37 +238,53 @@ export class CallEngine {
 
     // ---- Room ----
     // The ack races a timeout so a dead signaling server can never hang the UI.
-    await new Promise<void>((resolve) => {
+    // A rejected join (full room, wrong passcode, locked) aborts the start.
+    const joinResult = await new Promise<{ ok: boolean; reason?: string; hostId?: string; locked?: boolean }>((resolve) => {
       let settled = false
-      const finish = () => {
+      const finish = (r: { ok: boolean; reason?: string }) => {
         if (!settled) {
           settled = true
-          resolve()
+          resolve(r)
         }
       }
-      const guard = window.setTimeout(finish, 12000)
+      const guard = window.setTimeout(() => finish({ ok: false, reason: 'Could not reach the call relay. Check your connection.' }), 12000)
       socket.emit(
         'room:join',
-        { roomId: this.roomId, name: opts.name },
-        (res: { ok: boolean; self?: { id: string }; peers?: Array<{ id: string; name: string; micOn: boolean; camOn: boolean; sharing: boolean }>; reason?: string }) => {
+        { roomId: this.roomId, name: opts.name, passwordHash: this.passwordHash },
+        (res: { ok: boolean; self?: { id: string }; peers?: Array<{ id: string; name: string; micOn: boolean; camOn: boolean; sharing: boolean }>; hostId?: string; locked?: boolean; hasPassword?: boolean; music?: { peerId: string; title: string; playing: boolean; position: number; duration: number; streamId?: string } | null; reason?: string }) => {
           window.clearTimeout(guard)
           if (!res?.ok) {
-            useCallStore.getState().addChat({
-              id: 'sys-' + Date.now(),
-              from: 'system',
-              name: 'System',
-              text: res?.reason ?? 'Could not join the room',
-              ts: Date.now(),
-              system: true,
-            })
+            finish({ ok: false, reason: res?.reason ?? 'Could not join the room' })
+            return
           }
           this.myId = res?.self?.id ?? socket.id!
           useCallStore.getState().setSelf({ id: this.myId })
+          useCallStore.getState().setHostId(res.hostId ?? null)
+          useCallStore.getState().setLocked(!!res.locked)
+          useCallStore.getState().setPasscodeProtected(!!res.hasPassword)
+          if (res.music?.peerId) {
+            // Late joiner: the music track is already flowing — learn its
+            // stream id now so the incoming ontrack is routed to the player.
+            this.remoteMusicStreamIds.clear()
+            if (res.music.streamId) this.remoteMusicStreamIds.add(res.music.streamId)
+            useCallStore.getState().setMusic({
+              peerId: res.music.peerId,
+              title: res.music.title,
+              playing: res.music.playing,
+              position: res.music.position,
+              duration: res.music.duration,
+            })
+          }
           if (res?.peers) this.reconcilePeers(res.peers)
-          finish()
+          finish({ ok: true })
         },
       )
     })
+
+    if (!joinResult.ok) {
+      await this.cleanupAfterFailedJoin()
+      throw new Error(joinResult.reason ?? 'Could not join the room')
+    }
 
     // ---- Events ----
     socket.on('peer:joined', ({ peer }: { peer: { id: string; name: string; micOn: boolean; camOn: boolean; sharing: boolean } }) => {
@@ -226,6 +314,73 @@ export class CallEngine {
       useCallStore.getState().addChat(msg)
     })
 
+    /* ---- security & host controls ---- */
+    socket.on('host:changed', ({ hostId }: { hostId: string }) => {
+      useCallStore.getState().setHostId(hostId)
+      if (hostId === this.myId) {
+        toast('You are now the host', { duration: 2400 })
+        useCallStore.getState().addChat({
+          id: 'sys-' + Math.random(),
+          from: 'system',
+          name: 'System',
+          text: 'You are now the host',
+          ts: Date.now(),
+          system: true,
+        })
+      }
+    })
+    socket.on('host:force-mute', () => {
+      if (this.micTrack) this.micTrack.enabled = false
+      useCallStore.getState().setSelf({ micOn: false })
+      this.socket?.emit('state:update', { micOn: false })
+      toast('The host muted your microphone', { duration: 2800 })
+    })
+    socket.on('room:locked', ({ locked }: { locked: boolean }) => {
+      useCallStore.getState().setLocked(locked)
+      useCallStore.getState().addChat({
+        id: 'sys-' + Math.random(),
+        from: 'system',
+        name: 'System',
+        text: locked ? 'The host locked this call' : 'The host unlocked this call',
+        ts: Date.now(),
+        system: true,
+      })
+    })
+    socket.on('room:kicked', () => {
+      useCallStore.getState().setKicked(true)
+    })
+
+    /* ---- listen together ---- */
+    socket.on('music:state', (data: { peerId: string; action: 'start' | 'meta' | 'stop'; streamId?: string; title?: string; playing?: boolean; position?: number; duration?: number }) => {
+      const store = useCallStore.getState()
+      if (data.action === 'stop' || !data.peerId) {
+        this.remoteMusicStreamIds.clear()
+        detachRemoteMusic()
+        store.setMusic({ ...INITIAL_MUSIC })
+        return
+      }
+      if (data.action === 'start' && data.streamId) {
+        this.remoteMusicStreamIds.add(data.streamId)
+        store.setMusic({
+          peerId: data.peerId,
+          title: data.title ?? 'Music',
+          playing: !!data.playing,
+          position: data.position ?? 0,
+          duration: data.duration ?? 0,
+        })
+      } else if (data.action === 'meta') {
+        store.setMusic({
+          title: data.title ?? store.music.title,
+          playing: !!data.playing,
+          position: data.position ?? 0,
+          duration: data.duration ?? store.music.duration,
+        })
+      }
+    })
+    socket.on('music:busy', () => {
+      toast('Someone is already sharing music', { duration: 2400 })
+    })
+
     socket.on('rtc:offer', async ({ from, sdp }: { from: string; sdp: string }) => {
       try {
         const pc = this.pcs.get(from)
@@ -234,10 +389,10 @@ export class CallEngine {
         const offerCollision = this.makingOffer.get(from) || pc.signalingState !== 'stable'
         this.ignoreOffer.set(from, !polite && offerCollision)
         if (this.ignoreOffer.get(from)) return
-        await pc.setRemoteDescription({ type: 'offer', sdp: mungeOpus(sdp) })
+        await pc.setRemoteDescription({ type: 'offer', sdp: this.munge(sdp) })
         await this.flushIce(from)
         const answer = await pc.createAnswer()
-        answer.sdp = mungeOpus(answer.sdp ?? '')
+        answer.sdp = this.munge(answer.sdp ?? '', pc.remoteDescription?.sdp ?? '')
         await pc.setLocalDescription(answer)
         this.socket?.emit('rtc:answer', { to: from, sdp: pc.localDescription!.sdp })
       } catch {
@@ -249,7 +404,7 @@ export class CallEngine {
       try {
         const pc = this.pcs.get(from)
         if (!pc || pc.signalingState !== 'have-local-offer') return
-        await pc.setRemoteDescription({ type: 'answer', sdp: mungeOpus(sdp) })
+        await pc.setRemoteDescription({ type: 'answer', sdp: this.munge(sdp, pc.localDescription?.sdp ?? '') })
         await this.flushIce(from)
       } catch {
         /* ignore */
@@ -366,7 +521,7 @@ export class CallEngine {
     this.ignoreOffer.set(peerId, false)
 
     // Local media into this connection
-    const senders: { audio?: RTCRtpSender; video?: RTCRtpSender } = {}
+    const senders: { audio?: RTCRtpSender; video?: RTCRtpSender; music?: RTCRtpSender } = {}
     if (this.localStream) {
       for (const track of this.localStream.getTracks()) {
         try {
@@ -392,6 +547,12 @@ export class CallEngine {
     pc.ontrack = (e) => {
       const stream = e.streams[0]
       if (!stream) return
+      // Listen-together streams ride their own MediaStream — recognize them by
+      // the stream id the sharer announced before the track ever lands.
+      if (this.remoteMusicStreamIds.has(stream.id)) {
+        void attachRemoteMusic(stream)
+        return
+      }
       putStream(peerId, stream)
       trackAudio(peerId, stream)
       useCallStore.getState().bumpPeerStream(peerId, true)
@@ -401,7 +562,7 @@ export class CallEngine {
       try {
         this.makingOffer.set(peerId, true)
         const offer = await pc.createOffer()
-        await pc.setLocalDescription({ type: 'offer', sdp: mungeOpus(offer.sdp ?? '') })
+        await pc.setLocalDescription({ type: 'offer', sdp: this.munge(offer.sdp ?? '') })
         const desc = pc.localDescription
         if (desc) this.socket?.emit('rtc:offer', { to: peerId, sdp: desc.sdp })
       } catch {
@@ -434,6 +595,8 @@ export class CallEngine {
         /* ignore */
       }
     }
+    // Someone joining mid-song gets the music track immediately
+    if (this.musicSource) this.ensureMusicSender(peerId, pc)
   }
 
   private dropPeer(peerId: string) {
@@ -449,6 +612,12 @@ export class CallEngine {
     putStream(peerId, null)
     useCallStore.getState().bumpPeerStream(peerId, false)
     useCallStore.getState().removePeer(peerId)
+    // If the music sharer left, the session is over
+    if (useCallStore.getState().music.peerId === peerId) {
+      detachRemoteMusic()
+      this.remoteMusicStreamIds.clear()
+      useCallStore.getState().setMusic({ ...INITIAL_MUSIC })
+    }
   }
 
   private reconcilePeers(
@@ -486,6 +655,215 @@ export class CallEngine {
         /* ignore */
       }
     }
+  }
+
+  /* ---------------- sdp: music-aware opus tuning ---------------- */
+
+  private musicIds(): Set<string> {
+    const ids = new Set<string>()
+    if (this.musicStreamId) ids.add(this.musicStreamId)
+    for (const id of this.remoteMusicStreamIds) ids.add(id)
+    return ids
+  }
+
+  /** mids of sections that carry a music msid in a reference (offer) SDP. */
+  private midsWithMusicSdp(referenceSdp: string): Set<string> {
+    const ids = this.musicIds()
+    const mids = new Set<string>()
+    if (!referenceSdp || ids.size === 0) return mids
+    let mid = ''
+    for (const line of referenceSdp.split('\r\n')) {
+      if (line.startsWith('m=')) mid = ''
+      const m1 = line.match(/^a=mid:(.+)$/)
+      if (m1) mid = m1[1].trim()
+      const m2 = line.match(/^a=msid:(\S+)/)
+      if (m2 && mid && ids.has(m2[1])) mids.add(mid)
+    }
+    return mids
+  }
+
+  private munge(sdp: string, referenceSdp = ''): string {
+    const ids = this.musicIds()
+    if (ids.size === 0) return mungeOpus(sdp, ids, new Set())
+    return mungeOpus(sdp, ids, this.midsWithMusicSdp(referenceSdp))
+  }
+
+  /* ---------------- listen together ---------------- */
+
+  private ensureMusicSender(peerId: string, pc: RTCPeerConnection) {
+    if (!this.musicSource) return
+    const senders = this.sendersMap.get(peerId)
+    if (!senders || senders.music) return
+    try {
+      const track = this.musicSource.stream.getAudioTracks()[0]
+      if (!track) return
+      const transceiver = pc.addTransceiver(track, {
+        streams: [this.musicSource.stream],
+        direction: 'sendrecv',
+      })
+      senders.music = transceiver.sender
+      const params = transceiver.sender.getParameters()
+      if (!params.encodings || params.encodings.length === 0) params.encodings = [{}]
+      params.encodings[0].maxBitrate = MUSIC_BITRATE
+      void transceiver.sender.setParameters(params).catch(() => undefined)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /** Share a music source with everyone. Replaces any current session. */
+  startMusicShare(source: MusicSource, origin: 'file' | 'test' | 'tab' = 'file') {
+    this.stopMusicShare()
+    this.musicSource = source
+    this.musicOrigin = origin
+    this.musicHandleStop = source.stop ?? null
+    this.musicStreamId = source.stream.id
+    for (const [peerId, pc] of this.pcs) this.ensureMusicSender(peerId, pc)
+    useCallStore.getState().setMusic({
+      peerId: this.myId,
+      title: source.title,
+      playing: source.isPlaying(),
+      position: source.getPosition(),
+      duration: source.duration,
+    })
+    this.socket?.emit('music:state', {
+      action: 'start',
+      streamId: this.musicStreamId,
+      title: source.title,
+      playing: source.isPlaying(),
+      position: source.getPosition(),
+      duration: source.duration,
+    })
+    this.startMusicMetaTimer()
+  }
+
+  stopMusicShare() {
+    if (this.musicUnsub) {
+      this.musicUnsub()
+      this.musicUnsub = null
+    }
+    if (this.musicMetaTimer !== null) {
+      window.clearInterval(this.musicMetaTimer)
+      this.musicMetaTimer = null
+    }
+    const wasSharing = !!this.musicSource
+    const stopHandle = this.musicHandleStop
+    this.musicSource = null
+    this.musicHandleStop = null
+    this.musicStreamId = ''
+    for (const [, senders] of this.sendersMap) {
+      const sender = senders.music
+      if (sender?.track) void sender.replaceTrack(null).catch(() => undefined)
+    }
+    if (stopHandle) stopHandle()
+    if (wasSharing) {
+      useCallStore.getState().setMusic({ ...INITIAL_MUSIC })
+      this.socket?.emit('music:state', { action: 'stop' })
+    }
+    this.lastMusicBitrate = 0
+  }
+
+  /** The active source, when it offers playback controls (file/test). */
+  get activeMusic(): MusicSource | null {
+    return this.musicSource
+  }
+
+  get musicSharing(): boolean {
+    return !!this.musicSource
+  }
+
+  get musicOriginKind(): 'file' | 'test' | 'tab' {
+    return this.musicOrigin
+  }
+
+  /** Push current playback state to everyone (called by the UI after actions). */
+  broadcastMusicMeta() {
+    if (!this.musicSource || !this.socket) return
+    this.socket.emit('music:state', {
+      action: 'meta',
+      title: this.musicSource.title,
+      playing: this.musicSource.isPlaying(),
+      position: this.musicSource.getPosition(),
+      duration: this.musicSource.duration,
+    })
+    useCallStore.getState().setMusic({
+      title: this.musicSource.title,
+      playing: this.musicSource.isPlaying(),
+      position: this.musicSource.getPosition(),
+      duration: this.musicSource.duration,
+    })
+  }
+
+  private startMusicMetaTimer() {
+    if (this.musicMetaTimer !== null) window.clearInterval(this.musicMetaTimer)
+    this.musicMetaTimer = window.setInterval(() => {
+      if (this.musicSource?.isPlaying()) this.broadcastMusicMeta()
+    }, 5000)
+  }
+
+  /** Music tracks ride the network like everything else — step down on a weak link. */
+  private applyMusicBitrate(level: NetworkLevel) {
+    const target = MUSIC_BITRATE_BY_LEVEL[level]
+    if (target === this.lastMusicBitrate) return
+    this.lastMusicBitrate = target
+    for (const [, senders] of this.sendersMap) {
+      const sender = senders.music
+      if (!sender?.track) continue
+      try {
+        const params = sender.getParameters()
+        if (!params.encodings || params.encodings.length === 0) params.encodings = [{}]
+        params.encodings[0].maxBitrate = target
+        void sender.setParameters(params).catch(() => undefined)
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  /* ---------------- host controls ---------------- */
+
+  get isHost(): boolean {
+    return useCallStore.getState().hostId === this.myId && !!this.myId
+  }
+
+  hostMute(peerId: string) {
+    if (this.isHost) this.socket?.emit('host:mute', { target: peerId })
+  }
+
+  hostRemove(peerId: string) {
+    if (this.isHost) this.socket?.emit('host:remove', { target: peerId })
+  }
+
+  hostMuteAll() {
+    if (this.isHost) this.socket?.emit('host:mute-all')
+  }
+
+  hostLock(locked: boolean) {
+    if (this.isHost) this.socket?.emit('host:lock', { locked })
+  }
+
+  /* ---------------- join failure cleanup ---------------- */
+
+  /** Undo everything start() did, without stopping the caller's preview stream. */
+  private async cleanupAfterFailedJoin() {
+    if (this.statsTimer !== null) {
+      window.clearInterval(this.statsTimer)
+      this.statsTimer = null
+    }
+    this.socket?.disconnect()
+    this.socket = null
+    for (const peerId of Array.from(this.pcs.keys())) this.dropPeer(peerId)
+    this.pcs.clear()
+    this.pendingIce.clear()
+    this.links.clear()
+    this.prevBytes.clear()
+    clearAllAudio()
+    putStream('self', null)
+    this.localStream = null
+    this.cameraTrack = null
+    this.micTrack = null
+    this.myId = ''
+    this.started = false
   }
 
   /* ---------------- controls ---------------- */
@@ -556,12 +934,15 @@ export class CallEngine {
     }
   }
 
-  async toggleShare(): Promise<boolean> {
-    const sharing = !useCallStore.getState().self.sharing
-    if (sharing) {
+  async toggleShare(): Promise<'started' | 'stopped' | 'cancelled'> {
+    const sharing = useCallStore.getState().self.sharing
+    if (!sharing) {
       try {
-        const display = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
+        const display = this.testMode
+          ? await createTestScreenStream()
+          : await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
         const track = display.getVideoTracks()[0]
+        if (!track) return 'cancelled'
         this.screenTrack = track
         track.addEventListener('ended', () => {
           void this.stopShare()
@@ -573,19 +954,37 @@ export class CallEngine {
         useCallStore.getState().setSelf({ sharing: true })
         this.socket?.emit('state:update', { sharing: true })
         useCallStore.getState().setSpotlight('self')
-        return true
+        // Tab / system audio, when the browser hands it over, rides the
+        // music channel (dedicated Opus stereo sender) — not the mic.
+        const audioTrack = display.getAudioTracks()[0]
+        if (audioTrack && !this.musicSource) {
+          this.startMusicShare(
+            {
+              stream: new MediaStream([audioTrack]),
+              title: 'Shared tab audio',
+              duration: 0,
+              getPosition: () => 0,
+              isPlaying: () => true,
+            },
+            'tab',
+          )
+        }
+        return 'started'
       } catch {
-        return false
+        return 'cancelled'
       }
     } else {
       await this.stopShare()
-      return false
+      return 'stopped'
     }
   }
 
   private async stopShare() {
     this.screenTrack?.stop()
     this.screenTrack = null
+    if (this.musicOrigin === 'tab' && this.musicSource) {
+      this.stopMusicShare()
+    }
     if (this.cameraTrack && this.cameraTrack.readyState === 'live') {
       // restore the camera as the outgoing video source and the local preview
       this.publishLocalTrack(this.cameraTrack, this.localStream ?? new MediaStream([this.cameraTrack]))
@@ -714,7 +1113,7 @@ export class CallEngine {
           if (r.type === 'remote-inbound-rtp' && typeof r.fractionLost === 'number') {
             loss = loss === null ? r.fractionLost : Math.max(loss, r.fractionLost)
           }
-          if (r.type === 'outbound-rtp' && r.kind === 'video' && typeof r.bytesSent === 'number') {
+          if (r.type === 'outbound-rtp' && typeof r.bytesSent === 'number' && (r.kind === 'video' || r.kind === 'audio')) {
             const prevB = this.prevBytes.get(r.id) ?? r.bytesSent
             bytesDelta += Math.max(0, r.bytesSent - prevB)
             nextPrev.set(r.id, r.bytesSent)
@@ -759,6 +1158,9 @@ export class CallEngine {
     }
     useCallStore.setState({ bitrateKbps: Math.round(totalKbps) })
 
+    // Music quality follows the network instead of fighting it
+    if (this.musicSource) this.applyMusicBitrate(overall)
+
     // Auto quality profile with hysteresis
     if (this.preset === 'auto') {
       if (overall <= 1) {
@@ -801,8 +1203,8 @@ export class CallEngine {
     if (!this.roomId || !this.socket) return
     this.socket.emit(
       'room:join',
-      { roomId: this.roomId, name: useCallStore.getState().self.name },
-      (res: { ok: boolean; self?: { id: string }; peers?: Array<{ id: string; name: string; micOn: boolean; camOn: boolean; sharing: boolean }> }) => {
+      { roomId: this.roomId, name: useCallStore.getState().self.name, passwordHash: this.passwordHash },
+      (res: { ok: boolean; self?: { id: string }; peers?: Array<{ id: string; name: string; micOn: boolean; camOn: boolean; sharing: boolean }>; hostId?: string; locked?: boolean }) => {
         // The server hands out a fresh socket id after a reconnect — adopt it,
         // otherwise our own messages and presence updates stop matching.
         if (res?.ok) {
@@ -810,6 +1212,8 @@ export class CallEngine {
             this.myId = res.self.id
             useCallStore.getState().setSelf({ id: res.self.id })
           }
+          if (res.hostId) useCallStore.getState().setHostId(res.hostId)
+          useCallStore.getState().setLocked(!!res.locked)
           if (res.peers) this.reconcilePeers(res.peers)
         }
       },
@@ -821,6 +1225,8 @@ export class CallEngine {
       window.clearInterval(this.statsTimer)
       this.statsTimer = null
     }
+    this.stopMusicShare()
+    detachRemoteMusic()
     this.socket?.emit('room:leave')
     for (const peerId of Array.from(this.pcs.keys())) this.dropPeer(peerId)
     this.screenTrack?.stop()

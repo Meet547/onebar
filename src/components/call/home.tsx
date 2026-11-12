@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { ArrowRight, ShieldCheck, SignalHigh, Zap } from 'lucide-react'
+import { ArrowRight, Lock, ShieldCheck, SignalHigh, Zap } from 'lucide-react'
 import { generateRoomCode } from '@/lib/call/types'
 import { BrandMark } from './brand'
 
@@ -15,15 +15,19 @@ const FEATURES = [
 export function Home({
   onCreate,
   error,
+  notice,
   onDismissError,
 }: {
-  onCreate: () => void
+  onCreate: (passcode: string) => void
   error?: boolean
+  notice?: string
   onDismissError?: () => void
 }) {
   const router = useRouter()
   const [name, setName] = useState('')
   const [code, setCode] = useState('')
+  const [passcode, setPasscode] = useState('')
+  const [wantPasscode, setWantPasscode] = useState(false)
 
   useEffect(() => {
     const t = window.setTimeout(() => setName(window.localStorage.getItem('pico-name') ?? ''), 0)
@@ -33,7 +37,7 @@ export function Home({
   const start = () => {
     const clean = name.trim() || 'Guest'
     window.localStorage.setItem('pico-name', clean)
-    onCreate()
+    onCreate(passcode.trim())
   }
 
   const joinByCode = () => {
@@ -79,6 +83,21 @@ export function Home({
               </button>
             </div>
           )}
+          {notice && (
+            <div
+              role="alert"
+              className="pico-pop mb-1 flex items-center justify-between gap-3 rounded-2xl bg-[#ff3b30]/[0.07] px-4 py-3"
+            >
+              <p className="text-[13px] font-semibold leading-snug text-[#ff3b30]">{notice}</p>
+              <button
+                onClick={onDismissError}
+                aria-label="Dismiss notice"
+                className="press shrink-0 text-[12px] font-bold uppercase tracking-wide text-[#ff3b30]/70"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
           <label htmlFor="home-name" className="sr-only">
             Your name
           </label>
@@ -91,6 +110,46 @@ export function Home({
             maxLength={24}
             className="ios-field"
           />
+
+          {/* Optional passcode */}
+          {wantPasscode ? (
+            <div className="pico-pop">
+              <div className="flex gap-2">
+                <input
+                  value={passcode}
+                  onChange={(e) => setPasscode(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && start()}
+                  placeholder="Passcode (optional)"
+                  aria-label="Room passcode"
+                  maxLength={24}
+                  autoComplete="new-password"
+                  className="ios-field min-w-0 flex-1"
+                />
+                <button
+                  onClick={() => {
+                    setWantPasscode(false)
+                    setPasscode('')
+                  }}
+                  aria-label="Remove passcode"
+                  className="press flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-[#f5f5f7] text-[#7c7c82] active:scale-90"
+                >
+                  <Lock className="h-4 w-4" strokeWidth={2.2} />
+                </button>
+              </div>
+              <p className="mt-1.5 px-1 text-[12px] font-medium leading-relaxed text-[#a9a9b0]">
+                Only people with the passcode can join. Leave empty for an open room.
+              </p>
+            </div>
+          ) : (
+            <button
+              onClick={() => setWantPasscode(true)}
+              className="press mx-auto flex items-center gap-1.5 text-[13px] font-semibold text-[#7c7c82]"
+            >
+              <Lock className="h-3.5 w-3.5" strokeWidth={2.4} />
+              Add a passcode
+            </button>
+          )}
+
           <button onClick={start} className="ios-pill w-full">
             Start a call
           </button>

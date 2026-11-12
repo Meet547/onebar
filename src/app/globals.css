@@ -335,3 +335,94 @@
 .speaking-ring-soft {
   box-shadow: 0 0 0 2.5px rgba(48, 209, 88, 0.85);
 }
+
+/* ---------- iOS switch (lock room, etc.) ---------- */
+.ios-switch {
+  @apply relative inline-flex h-[31px] w-[51px] shrink-0 items-center rounded-full;
+  background: rgba(120, 120, 128, 0.32);
+  transition: background-color var(--dur-move) var(--ease-out);
+}
+.ios-switch::after {
+  content: '';
+  @apply absolute left-[2px] block h-[27px] w-[27px] rounded-full bg-white;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2), 0 0 1px rgba(0, 0, 0, 0.1);
+  transition: transform var(--dur-move) var(--ease-spring);
+}
+.ios-switch[data-on='true'] {
+  background: #30d158;
+}
+.ios-switch[data-on='true']::after {
+  transform: translateX(20px);
+}
+.ios-switch:active::after {
+  transform: scale(0.94);
+}
+.ios-switch[data-on='true']:active::after {
+  transform: translateX(20px) scale(0.94);
+}
+
+/* ---------- Music equalizer (now-playing chip) ---------- */
+@keyframes pico-eq {
+  0%,
+  100% {
+    transform: scaleY(0.3);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+.eq-bar {
+  @apply h-3 w-[2.5px] origin-center rounded-full bg-[#0d0d0f];
+  transform: scaleY(0.3);
+  animation: pico-eq 0.9s ease-in-out infinite;
+}
+.eq-bar-dark {
+  @apply bg-white/95;
+}
+
+/* ---------- Range input, iOS style (music seek / volume) ---------- */
+.ios-range {
+  @apply h-1 w-full appearance-none rounded-full bg-[#e8e8ed] outline-none;
+}
+.ios-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 18px;
+  width: 18px;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25), 0 0 1px rgba(0, 0, 0, 0.15);
+  cursor: pointer;
+  transition: transform var(--dur-press) var(--ease-spring);
+}
+.ios-range::-webkit-slider-thumb:active {
+  transform: scale(1.15);
+}
+.ios-range::-moz-range-thumb {
+  height: 18px;
+  width: 18px;
+  border: none;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+}
+
+/* Compact control bar on phones — everything still reachable with a thumb */
+@media (max-width: 640px) {
+  .control-bar .ios-control {
+    height: 40px;
+    width: 40px;
+  }
+  .control-bar .ios-control svg {
+    height: 17px;
+    width: 17px;
+  }
+  .control-bar button[aria-label='Leave call'] {
+    height: 40px;
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+}
+
+/* dev nudge */

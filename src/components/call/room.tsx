@@ -7,7 +7,9 @@ import {
   Mic,
   MicOff,
   MonitorUp,
+  Music2,
   Phone,
+  ShieldCheck,
   SlidersHorizontal,
   Users,
   Video,
@@ -17,8 +19,8 @@ import { getEngine } from '@/lib/call/engine'
 import { useCallStore } from '@/lib/call/store'
 import type { PeerState } from '@/lib/call/types'
 import { VideoTile } from './video-tile'
-import { NetworkBars, LEVEL_LABEL } from './network-bars'
-import { ChatPanel, ParticipantsPanel, QualityPanel } from './panels'
+import { NetworkBars } from './network-bars'
+import { ChatPanel, MusicPanel, ParticipantsPanel, QualityPanel, SecurityPanel } from './panels'
 import { BrandMark, useSpeakingRingSoft } from './brand'
 
 /* ---------------- call timer (isolated: re-renders once per second) ---------------- */
@@ -154,7 +156,7 @@ function VideoGrid() {
 
 /* ---------------- room ---------------- */
 
-type Panel = 'chat' | 'people' | 'quality' | null
+type Panel = 'chat' | 'people' | 'quality' | 'music' | 'security' | null
 
 export function Room({ roomCode, onLeave }: { roomCode: string; onLeave: () => void }) {
   const [panel, setPanel] = useState<Panel>(null)
@@ -163,6 +165,7 @@ export function Room({ roomCode, onLeave }: { roomCode: string; onLeave: () => v
   const overall = useCallStore((s) => s.overallLevel)
   const signaling = useCallStore((s) => s.signalingConnected)
   const peerCount = useCallStore((s) => Object.keys(s.peers).length)
+  const music = useCallStore((s) => s.music)
   const micMeterRef = useSpeakingRingSoft('self', self.micOn)
 
   // opening the chat clears the unread badge
@@ -179,8 +182,10 @@ export function Room({ roomCode, onLeave }: { roomCode: string; onLeave: () => v
     toast(on ? 'Camera on' : 'Camera off', { duration: 1200 })
   }
   const toggleShare = async () => {
-    const on = await getEngine().toggleShare()
-    toast(on ? 'You are sharing your screen' : 'Screen sharing stopped', { duration: 1600 })
+    const result = await getEngine().toggleShare()
+    if (result === 'started') toast('You are sharing your screen', { duration: 1600 })
+    else if (result === 'stopped') toast('Screen sharing stopped', { duration: 1600 })
+    else toast('Screen share cancelled', { duration: 1400 })
   }
   const leave = () => {
     getEngine().leave()
@@ -196,6 +201,8 @@ export function Room({ roomCode, onLeave }: { roomCode: string; onLeave: () => v
     }
   }
 
+  const musicActive = music.peerId !== null
+
   return (
     <div className="flex h-[100dvh] flex-col bg-white">
       {/* Header */}
@@ -207,7 +214,7 @@ export function Room({ roomCode, onLeave }: { roomCode: string; onLeave: () => v
           </span>
           <button
             onClick={copyLink}
-            className="press flex max-w-[180px] items-center gap-1.5 rounded-full bg-[#f5f5f7] py-1.5 pl-3 pr-3"
+            className="press flex max-w-[140px] items-center gap-1.5 rounded-full bg-[#f5f5f7] py-1.5 pl-3 pr-3 sm:max-w-[180px]"
             title="Copy invite link"
           >
             <span className="truncate font-mono text-[12px] font-medium text-[#0d0d0f]">{roomCode}</span>
@@ -217,15 +224,23 @@ export function Room({ roomCode, onLeave }: { roomCode: string; onLeave: () => v
 
         <div className="flex shrink-0 items-center gap-2.5">
           {!signaling && <span className="text-[12px] font-semibold text-[#ff9500]">Reconnecting…</span>}
+          <button
+            onClick={() => setPanel('security')}
+            className="press flex items-center gap-1.5 rounded-full bg-[#f5f5f7] py-1.5 pl-2 pr-2.5"
+            title="Privacy and security"
+            aria-label="Privacy and security"
+          >
+            <ShieldCheck className="h-3.5 w-3.5 text-[#30d158]" strokeWidth={2.4} />
+            <span className="hidden text-[11px] font-bold uppercase tracking-wide text-[#7c7c82] sm:inline">
+              Encrypted
+            </span>
+          </button>
           <span
             className="h-1.5 w-1.5 rounded-full pico-breathe"
             style={{ backgroundColor: peerCount > 0 ? '#30d158' : '#c7c7cd' }}
             title={peerCount > 0 ? 'In call' : 'Waiting for others'}
           />
           <NetworkBars level={overall} />
-          <span className="hidden text-[12px] font-medium text-[#7c7c82] sm:inline" title={LEVEL_LABEL[overall]}>
-            {LEVEL_LABEL[overall].split(' ')[0]}
-          </span>
           <CallTimer />
         </div>
       </header>
@@ -242,9 +257,30 @@ export function Room({ roomCode, onLeave }: { roomCode: string; onLeave: () => v
         )}
       </main>
 
+      {/* Now playing pill */}
+      {musicActive && panel !== 'music' && (
+        <button
+          onClick={() => setPanel('music')}
+          aria-label="Open music panel"
+          className="pico-pop mx-auto mb-1 flex max-w-[92vw] items-center gap-2.5 rounded-full bg-[#0d0d0f] py-2 pl-3 pr-4 text-white shadow-[0_8px_28px_rgba(0,0,0,0.22)]"
+        >
+          <Music2 className="h-4 w-4 shrink-0 text-[#30d158]" strokeWidth={2.4} />
+          <span className="min-w-0 truncate text-[13px] font-semibold">{music.title}</span>
+          <span className="flex shrink-0 items-end gap-[2px]" aria-hidden>
+            {[0, 1, 2].map((i) => (
+              <span
+                key={i}
+                className="eq-bar eq-bar-dark h-2.5"
+                style={{ animationDelay: `${i * 160}ms`, animationPlayState: music.playing ? 'running' : 'paused' }}
+              />
+            ))}
+          </span>
+        </button>
+      )}
+
       {/* Control bar */}
       <nav className="safe-bottom z-20 flex justify-center pb-4 pt-1" aria-label="Meeting controls">
-        <div className="glass flex items-center gap-2 rounded-full border border-black/[0.05] px-3 py-2 shadow-[0_8px_28px_rgba(0,0,0,0.08)]">
+        <div className="control-bar glass flex items-center gap-1 rounded-full border border-black/[0.05] px-2 py-2 shadow-[0_8px_28px_rgba(0,0,0,0.08)] sm:gap-2 sm:px-3">
           <div ref={micMeterRef} className="rounded-full transition-shadow duration-200">
             <ControlButton
               onClick={toggleMic}
@@ -264,6 +300,13 @@ export function Room({ roomCode, onLeave }: { roomCode: string; onLeave: () => v
           <ControlButton onClick={() => void toggleShare()} active={self.sharing} label={self.sharing ? 'Stop sharing' : 'Share screen'}>
             <MonitorUp className="h-[19px] w-[19px]" strokeWidth={2.2} />
           </ControlButton>
+          <ControlButton
+            onClick={() => setPanel(panel === 'music' ? null : 'music')}
+            active={musicActive}
+            label="Listen together"
+          >
+            <Music2 className="h-[19px] w-[19px]" strokeWidth={2.2} />
+          </ControlButton>
           <ControlButton onClick={() => setPanel(panel === 'chat' ? null : 'chat')} label="Chat" badge={unread}>
             <MessageSquare className="h-[19px] w-[19px]" strokeWidth={2.2} />
           </ControlButton>
@@ -276,7 +319,7 @@ export function Room({ roomCode, onLeave }: { roomCode: string; onLeave: () => v
           <button
             onClick={leave}
             aria-label="Leave call"
-            className="ml-1 flex h-[52px] items-center gap-1.5 rounded-full bg-[#ff3b30] px-5 text-[15px] font-bold text-white transition-all duration-[130ms] ease-[cubic-bezier(0.34,1.35,0.64,1)] hover:bg-[#eb3329] active:scale-90"
+            className="ml-0.5 flex h-[52px] items-center gap-1.5 rounded-full bg-[#ff3b30] px-4 text-[15px] font-bold text-white transition-all duration-[130ms] ease-[cubic-bezier(0.34,1.35,0.64,1)] hover:bg-[#eb3329] active:scale-90 sm:ml-1 sm:px-5"
           >
             <Phone className="h-[17px] w-[17px] rotate-[135deg]" strokeWidth={2.4} />
             <span className="hidden sm:inline">Leave</span>
@@ -288,6 +331,8 @@ export function Room({ roomCode, onLeave }: { roomCode: string; onLeave: () => v
       {panel === 'chat' && <ChatPanel onClose={() => setPanel(null)} />}
       {panel === 'people' && <ParticipantsPanel onClose={() => setPanel(null)} roomCode={roomCode} />}
       {panel === 'quality' && <QualityPanel onClose={() => setPanel(null)} />}
+      {panel === 'music' && <MusicPanel onClose={() => setPanel(null)} />}
+      {panel === 'security' && <SecurityPanel onClose={() => setPanel(null)} />}
     </div>
   )
 }

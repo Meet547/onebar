@@ -4,7 +4,7 @@ import { Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { getEngine } from '@/lib/call/engine'
 import { useCallStore } from '@/lib/call/store'
-import { generateRoomCode } from '@/lib/call/types'
+import { generateRoomCode, hashPasscode } from '@/lib/call/types'
 import { Home } from '@/components/call/home'
 import { PreJoin } from '@/components/call/prejoin'
 import { Room } from '@/components/call/room'
@@ -19,7 +19,10 @@ function PicoApp() {
 
   const [view, setView] = useState<View>(urlRoom ? 'prejoin' : 'home')
   const [roomCode, setRoomCode] = useState(urlRoom)
-  const [joinError, setJoinError] = useState(false)
+  const [joinError, setJoinError] = useState<string | null>(null)
+  const [kickedNotice, setKickedNotice] = useState<string | null>(null)
+  // Passcode chosen by the creator on the home screen (hashed before sending)
+  const pendingPasscodeHash = useRef('')
 
   const previewRef = useRef<MediaStream | null>(null)
 
@@ -41,33 +44,57 @@ function PicoApp() {
     return () => window.removeEventListener('beforeunload', onUnload)
   }, [])
 
-  const create = useCallback(() => {
-    const code = generateRoomCode()
-    setRoomCode(code)
-    setView('prejoin')
-    window.history.replaceState(null, '', `/?room=${code}${testMode ? '&test=1' : ''}`)
+  // Removed by the host — tear down and show why, back on the home screen.
+  useEffect(() => {
+    return useCallStore.subscribe((state) => {
+      if (!state.kicked) return
+      useCallStore.getState().setKicked(false)
+      void getEngine().leave(true)
+      previewRef.current?.getTracks().forEach((t) => t.stop())
+      previewRef.current = null
+      setKickedNotice('The host removed you from the call')
+      setView('home')
+      window.history.replaceState(null, '', testMode ? '/?test=1' : '/')
+    })
   }, [testMode])
 
+  const create = useCallback(
+    (passcode: string) => {
+      pendingPasscodeHash.current = passcode ? hashPasscode(passcode) : ''
+      const code = generateRoomCode()
+      setRoomCode(code)
+      setJoinError(null)
+      setView('prejoin')
+      window.history.replaceState(null, '', `/?room=${code}${testMode ? '&test=1' : ''}`)
+    },
+    [testMode],
+  )
+
   const joinWithStream = useCallback(
-    async (stream: MediaStream | null) => {
+    async (stream: MediaStream | null, passcode: string) => {
       previewRef.current = stream
+      setJoinError(null)
       try {
         const name = window.localStorage.getItem('pico-name') || 'Guest'
+        const hash = passcode ? hashPasscode(passcode) : pendingPasscodeHash.current
         await getEngine().start({
           roomId: roomCode,
           name,
           preset: 'balanced',
           initialStream: stream,
           testMode,
+          passwordHash: hash,
         })
         previewRef.current = null // engine now owns the stream
+        pendingPasscodeHash.current = hash
         setView('room')
-      } catch {
-        // Engine surfaced a hard failure — release the mic/cam and back out.
-        stream?.getTracks().forEach((t) => t.stop())
+      } catch (err) {
+        // Rejected by the relay (wrong passcode, locked, full) — the preview
+        // stream is still alive, so stay on the pre-join screen and say why.
         previewRef.current = null
-        setJoinError(true)
-        setView('home')
+        stream?.getTracks().forEach((t) => t.stop())
+        setJoinError(err instanceof Error ? err.message : 'Could not join the room')
+        setView('prejoin')
       }
     },
     [roomCode, testMode],
@@ -75,17 +102,29 @@ function PicoApp() {
 
   const backToHome = useCallback(() => {
     setView('home')
+    setJoinError(null)
     if (!urlRoom) return
     router.replace('/')
   }, [router, urlRoom])
 
   const leaveCall = useCallback(() => {
     setView(urlRoom ? 'prejoin' : 'home')
+    setJoinError(null)
     window.history.replaceState(null, '', testMode ? '/?test=1' : '/')
   }, [urlRoom, testMode])
 
   if (view === 'home') {
-    return <Home onCreate={create} error={joinError} onDismissError={() => setJoinError(false)} />
+    return (
+      <Home
+        onCreate={create}
+        error={joinError !== null}
+        notice={kickedNotice ?? undefined}
+        onDismissError={() => {
+          setJoinError(null)
+          setKickedNotice(null)
+        }}
+      />
+    )
   }
 
   if (view === 'prejoin') {
@@ -93,8 +132,9 @@ function PicoApp() {
       <PreJoin
         roomCode={roomCode}
         testMode={testMode}
+        joinError={joinError}
         onBack={backToHome}
-        onJoin={(stream) => void joinWithStream(stream)}
+        onJoin={(stream, passcode) => void joinWithStream(stream, passcode)}
       />
     )
   }

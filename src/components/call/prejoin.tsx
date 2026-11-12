@@ -1,21 +1,29 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { ArrowLeft, Loader2, Mic, MicOff, Video, VideoOff } from 'lucide-react'
+import { ArrowLeft, KeyRound, Loader2, Lock, Mic, MicOff, Video, VideoOff } from 'lucide-react'
 import { useCallStore } from '@/lib/call/store'
 import { createTestStream } from '@/lib/call/test-stream'
 
 type PreviewMode = 'loading' | 'full' | 'audio' | 'none'
 
+interface RoomInfo {
+  exists: boolean
+  locked: boolean
+  hasPassword: boolean
+  count: number
+}
+
 interface PreJoinProps {
   roomCode: string
   testMode: boolean
+  joinError?: string | null
   onBack: () => void
   /** Receives ownership of the preview stream (engine will stop it on leave). */
-  onJoin: (stream: MediaStream | null) => void
+  onJoin: (stream: MediaStream | null, passcode: string) => void
 }
 
-export function PreJoin({ roomCode, testMode, onBack, onJoin }: PreJoinProps) {
+export function PreJoin({ roomCode, testMode, joinError, onBack, onJoin }: PreJoinProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const nameRef = useRef<HTMLInputElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -23,6 +31,8 @@ export function PreJoin({ roomCode, testMode, onBack, onJoin }: PreJoinProps) {
   const [mode, setMode] = useState<PreviewMode>('loading')
   const [displayName, setDisplayName] = useState('')
   const [joining, setJoining] = useState(false)
+  const [passcode, setPasscode] = useState('')
+  const [roomInfo, setRoomInfo] = useState<RoomInfo | null>(null)
   const micOn = useCallStore((s) => s.self.micOn)
   const camOn = useCallStore((s) => s.self.camOn)
 
@@ -33,6 +43,14 @@ export function PreJoin({ roomCode, testMode, onBack, onJoin }: PreJoinProps) {
       setDisplayName(nameRef.current.value)
     }
     let cancelled = false
+
+    // Ask the relay what this room expects — passcode, lock status.
+    const info = fetch(`/info?XTransformPort=3004&room=${encodeURIComponent(roomCode)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null)
+    void info.then((data: RoomInfo | null) => {
+      if (!cancelled && data) setRoomInfo(data)
+    })
 
     const acquire = async () => {
       let stream: MediaStream | null = null
@@ -74,7 +92,7 @@ export function PreJoin({ roomCode, testMode, onBack, onJoin }: PreJoinProps) {
       // Stop preview only if it was not handed to the engine on join
       if (!handedOff.current) streamRef.current?.getTracks().forEach((t) => t.stop())
     }
-  }, [testMode])
+  }, [testMode, roomCode])
 
   const toggleMic = () => {
     const next = !micOn
@@ -92,10 +110,11 @@ export function PreJoin({ roomCode, testMode, onBack, onJoin }: PreJoinProps) {
     window.localStorage.setItem('pico-name', clean)
     setJoining(true)
     handedOff.current = true
-    onJoin(streamRef.current)
+    onJoin(streamRef.current, passcode.trim())
   }
 
   const initials = (displayName.trim() || 'Guest').slice(0, 2).toUpperCase()
+  const needsPasscode = roomInfo?.hasPassword === true
 
   return (
     <div className="flex min-h-[100dvh] flex-col bg-white">
@@ -105,7 +124,10 @@ export function PreJoin({ roomCode, testMode, onBack, onJoin }: PreJoinProps) {
         </button>
         <div className="min-w-0">
           <h1 className="text-[17px] font-bold tracking-[-0.01em] text-[#0d0d0f]">Ready to join?</h1>
-          <p className="truncate font-mono text-[12px] text-[#7c7c82]">{roomCode}</p>
+          <p className="flex items-center gap-1.5 truncate font-mono text-[12px] text-[#7c7c82]">
+            {roomInfo?.locked && <Lock className="h-3 w-3 text-[#ff9500]" strokeWidth={2.6} />}
+            {roomCode}
+          </p>
         </div>
       </header>
 
@@ -145,6 +167,15 @@ export function PreJoin({ roomCode, testMode, onBack, onJoin }: PreJoinProps) {
           )}
         </div>
 
+        {joinError && (
+          <div
+            role="alert"
+            className="pico-pop flex items-center gap-2.5 rounded-2xl bg-[#ff3b30]/[0.07] px-4 py-3"
+          >
+            <p className="text-[13px] font-semibold leading-snug text-[#ff3b30]">{joinError}</p>
+          </div>
+        )}
+
         {/* Device toggles */}
         <div className="flex justify-center gap-4">
           <button
@@ -179,19 +210,44 @@ export function PreJoin({ roomCode, testMode, onBack, onJoin }: PreJoinProps) {
             onKeyDown={(e) => e.key === 'Enter' && join()}
             placeholder="Guest"
             maxLength={24}
-            autoFocus
+            autoFocus={!needsPasscode}
             className="ios-field"
           />
         </div>
 
+        {/* Passcode (only when the room has one) */}
+        {needsPasscode && (
+          <div className="pico-pop">
+            <label htmlFor="pico-passcode" className="mb-1.5 flex items-center gap-1.5 px-1 text-[12px] font-bold uppercase tracking-[0.08em] text-[#7c7c82]">
+              <KeyRound className="h-3 w-3" strokeWidth={2.6} />
+              Passcode
+            </label>
+            <input
+              id="pico-passcode"
+              value={passcode}
+              onChange={(e) => setPasscode(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && join()}
+              placeholder="Enter the room passcode"
+              maxLength={24}
+              autoFocus
+              autoComplete="off"
+              className="ios-field"
+            />
+          </div>
+        )}
+
         {/* Join */}
-        <button onClick={join} disabled={joining} className="ios-pill w-full">
+        <button
+          onClick={join}
+          disabled={joining || (needsPasscode && passcode.trim().length === 0)}
+          className="ios-pill w-full"
+        >
           {joining ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
           {joining ? 'Connecting…' : 'Join call'}
         </button>
 
         <p className="text-center text-[12px] leading-relaxed text-[#a9a9b0]">
-          Peer-to-peer call · nothing is recorded
+          Peer-to-peer call · encrypted in transit · nothing is recorded
           <br />
           On a slow connection, pick “Data Saver” inside the call
         </p>
