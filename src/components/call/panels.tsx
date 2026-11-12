@@ -5,7 +5,6 @@ import {
   ArrowUp,
   CameraOff,
   Check,
-  Copy,
   Link2,
   MicOff,
   MonitorUp,
@@ -32,18 +31,14 @@ function Sheet({
 }) {
   return (
     <aside
-      className="pico-slide-up fixed inset-x-0 bottom-0 z-40 flex h-[68vh] flex-col rounded-t-3xl border border-black/[0.06] bg-white/95 shadow-[0_-8px_40px_rgba(0,0,0,0.12)] backdrop-blur-xl sm:inset-y-0 sm:left-auto sm:right-4 sm:top-4 sm:bottom-24 sm:h-auto sm:w-[360px] sm:rounded-3xl"
+      className="pico-sheet-up fixed inset-x-0 bottom-0 z-40 flex h-[68vh] flex-col rounded-t-[24px] border border-black/[0.05] bg-white/95 shadow-[0_-8px_40px_rgba(0,0,0,0.10)] backdrop-blur-xl sm:inset-y-0 sm:left-auto sm:right-4 sm:top-4 sm:bottom-24 sm:h-auto sm:w-[360px] sm:rounded-[24px]"
       role="dialog"
       aria-label={title}
     >
       <header className="flex items-center justify-between border-b border-black/[0.05] px-5 py-3.5">
-        <h2 className="text-[15px] font-semibold text-[#1c1c1e]">{title}</h2>
-        <button
-          onClick={onClose}
-          aria-label={`Close ${title}`}
-          className="flex h-7 w-7 items-center justify-center rounded-full bg-[#f2f2f7] text-[#86868b] transition-colors hover:bg-[#e5e5ea]"
-        >
-          <X className="h-3.5 w-3.5" />
+        <h2 className="text-[15px] font-bold tracking-[-0.01em] text-[#0d0d0f]">{title}</h2>
+        <button onClick={onClose} aria-label={`Close ${title}`} className="ios-square">
+          <X className="h-3.5 w-3.5" strokeWidth={2.6} />
         </button>
       </header>
       {children}
@@ -77,30 +72,30 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
     <Sheet title="Chat" onClose={onClose}>
       <div ref={listRef} className="ios-scroll flex-1 space-y-2.5 overflow-y-auto px-4 py-4">
         {chat.length === 0 && (
-          <p className="mt-10 text-center text-[13px] text-[#aeaeb2]">Messages appear here</p>
+          <p className="mt-10 text-center text-[13px] font-medium text-[#a9a9b0]">Messages appear here</p>
         )}
         {chat.map((m) =>
           m.system ? (
-            <p key={m.id} className="text-center text-[11px] font-medium text-[#aeaeb2]">
+            <p key={m.id} className="text-center text-[11px] font-semibold uppercase tracking-[0.06em] text-[#a9a9b0]">
               {m.text}
             </p>
           ) : m.from === selfId ? (
             <div key={m.id} className="flex justify-end">
-              <div className="max-w-[80%] rounded-2xl rounded-br-md bg-[#34c759] px-3.5 py-2">
-                <p className="whitespace-pre-wrap break-words text-[13.5px] leading-snug text-white">{m.text}</p>
-                <p className="mt-0.5 text-right text-[10px] text-white/70">
+              <div className="max-w-[80%] rounded-[18px] rounded-br-[6px] bg-[#0d0d0f] px-3.5 py-2">
+                <p className="whitespace-pre-wrap break-words text-[13px] leading-snug text-white">{m.text}</p>
+                <p className="mt-0.5 text-right text-[10px] font-medium text-white/55">
                   {new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                 </p>
               </div>
             </div>
           ) : (
             <div key={m.id} className="flex justify-start">
-              <div className="max-w-[80%] rounded-2xl rounded-bl-md bg-[#f2f2f7] px-3.5 py-2">
-                <p className="text-[11px] font-semibold text-[#86868b]">{m.name}</p>
-                <p className="mt-0.5 whitespace-pre-wrap break-words text-[13.5px] leading-snug text-[#1c1c1e]">
+              <div className="max-w-[80%] rounded-[18px] rounded-bl-[6px] bg-[#f5f5f7] px-3.5 py-2">
+                <p className="text-[11px] font-bold text-[#7c7c82]">{m.name}</p>
+                <p className="mt-0.5 whitespace-pre-wrap break-words text-[13px] leading-snug text-[#0d0d0f]">
                   {m.text}
                 </p>
-                <p className="mt-0.5 text-[10px] text-[#aeaeb2]">
+                <p className="mt-0.5 text-[10px] font-medium text-[#a9a9b0]">
                   {new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                 </p>
               </div>
@@ -122,15 +117,15 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
             placeholder="Message"
             aria-label="Chat message"
             maxLength={500}
-            className="h-10 flex-1 rounded-full border border-black/[0.06] bg-[#f2f2f7] px-4 text-[14px] text-[#1c1c1e] outline-none placeholder:text-[#aeaeb2] focus:border-black/[0.14]"
+            className="ios-field h-10 flex-1 rounded-full"
           />
           <button
             onClick={send}
             disabled={!draft.trim()}
             aria-label="Send message"
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#1c1c1e] text-white transition-all duration-150 active:scale-90 disabled:bg-[#e5e5ea] disabled:text-[#aeaeb2]"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#0d0d0f] text-white transition-all duration-[130ms] ease-[cubic-bezier(0.34,1.35,0.64,1)] hover:bg-[#26262b] active:scale-90 disabled:bg-[#e8e8ed] disabled:text-[#a9a9b0]"
           >
-            <ArrowUp className="h-4.5 w-4.5" />
+            <ArrowUp className="h-4 w-4" strokeWidth={2.6} />
           </button>
         </div>
       </footer>
@@ -186,41 +181,38 @@ export function ParticipantsPanel({ onClose, roomCode }: { onClose: () => void; 
   return (
     <Sheet title={`People · ${everyone.length}`} onClose={onClose}>
       <div className="border-b border-black/[0.05] p-3">
-        <button
-          onClick={copy}
-          className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#f2f2f7] py-2.5 text-[14px] font-semibold text-[#1c1c1e] transition-all active:scale-[0.98]"
-        >
-          {copied ? <Check className="h-4 w-4 text-[#34c759]" /> : <Link2 className="h-4 w-4 text-[#86868b]" />}
+        <button onClick={copy} className="ios-pill-soft h-10 w-full text-[13px]">
+          {copied ? <Check className="h-4 w-4 text-[#30d158]" strokeWidth={2.6} /> : <Link2 className="h-4 w-4 text-[#7c7c82]" strokeWidth={2.2} />}
           {copied ? 'Link copied' : 'Copy invite link'}
         </button>
-        <p className="mt-2 text-center text-[11px] font-medium tracking-wide text-[#aeaeb2]">
+        <p className="mt-2 text-center font-mono text-[11px] font-medium tracking-wide text-[#a9a9b0]">
           {roomCode}
         </p>
       </div>
       <ul className="ios-scroll flex-1 overflow-y-auto p-2">
         {everyone.map((p) => (
-          <li key={p.id} className="flex items-center gap-3 rounded-xl px-3 py-2.5">
-            <div className="flex h-9 w-9 items-center justify-center rounded-full bg-[#e5e5ea] text-[12px] font-semibold text-[#6e6e73]">
+          <li key={p.id} className="flex items-center gap-3 rounded-2xl px-3 py-2.5">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#e8e8ed] text-[12px] font-bold text-[#7c7c82]">
               {p.name.slice(0, 2).toUpperCase()}
             </div>
             <div className="min-w-0 flex-1">
-              <p className="truncate text-[14px] font-medium text-[#1c1c1e]">
+              <p className="truncate text-[15px] font-semibold text-[#0d0d0f]">
                 {p.name}
                 {p.isSelf ? ' (You)' : ''}
               </p>
-              <p className="text-[11px] text-[#aeaeb2]">
+              <p className="text-[12px] font-medium text-[#a9a9b0]">
                 {p.sharing ? 'Sharing screen' : p.camOn ? 'Camera on' : 'Camera off'}
               </p>
             </div>
-            <div className="flex items-center gap-1.5 text-[#86868b]">
-              {!p.micOn && <MicOff className="h-4 w-4 text-[#ff3b30]" aria-label="Muted" />}
-              {!p.camOn && !p.sharing && <CameraOff className="h-4 w-4" aria-label="Camera off" />}
-              {p.sharing && <MonitorUp className="h-4 w-4 text-[#34c759]" aria-label="Sharing" />}
+            <div className="flex items-center gap-1.5 text-[#7c7c82]">
+              {!p.micOn && <MicOff className="h-4 w-4 text-[#ff3b30]" aria-label="Muted" strokeWidth={2.4} />}
+              {!p.camOn && !p.sharing && <CameraOff className="h-4 w-4" aria-label="Camera off" strokeWidth={2.4} />}
+              {p.sharing && <MonitorUp className="h-4 w-4 text-[#30d158]" aria-label="Sharing" strokeWidth={2.4} />}
             </div>
           </li>
         ))}
       </ul>
-      <footer className="border-t border-black/[0.05] px-4 py-3 text-center text-[11px] text-[#aeaeb2]">
+      <footer className="border-t border-black/[0.05] px-4 py-3 text-center text-[12px] font-medium text-[#a9a9b0]">
         <Users className="mr-1 inline h-3 w-3" /> Peer-to-peer · up to 8 people
       </footer>
     </Sheet>
@@ -257,37 +249,37 @@ export function QualityPanel({ onClose }: { onClose: () => void }) {
   return (
     <Sheet title="Video quality" onClose={onClose}>
       <div className="ios-scroll flex-1 overflow-y-auto p-4">
-        <div className="mb-4 flex items-center justify-between rounded-2xl bg-[#f2f2f7] px-4 py-3">
+        <div className="mb-4 flex items-center justify-between rounded-[18px] bg-[#f5f5f7] px-4 py-3">
           <div>
-            <p className="text-[13px] font-semibold text-[#1c1c1e]">{effective || 'Auto'}</p>
-            <p className="text-[11px] text-[#86868b]">Sending ~{bitrate} kbps</p>
+            <p className="text-[15px] font-bold text-[#0d0d0f]">{effective || 'Auto'}</p>
+            <p className="text-[12px] font-medium tabular-nums text-[#7c7c82]">Sending ~{bitrate} kbps</p>
           </div>
           <div className="flex items-center gap-2">
             <NetworkBars level={overall} size="md" />
-            <span className="text-[11px] text-[#86868b]">{LEVEL_LABEL[overall]}</span>
+            <span className="text-[12px] font-medium text-[#7c7c82]">{LEVEL_LABEL[overall]}</span>
           </div>
         </div>
 
-        <div className="overflow-hidden rounded-2xl border border-black/[0.05]">
+        <div className="overflow-hidden rounded-[18px] border border-black/[0.05]">
           {PRESET_OPTIONS.map((opt, i) => (
             <button
               key={opt.key}
               onClick={() => void choose(opt.key)}
               disabled={pending !== null}
-              className={`flex w-full items-center justify-between px-4 py-3 text-left transition-colors hover:bg-[#f7f7f9] ${
+              className={`flex w-full items-center justify-between px-4 py-3 text-left transition-colors duration-150 hover:bg-[#f7f7f9] active:bg-[#f0f0f4] ${
                 i > 0 ? 'border-t border-black/[0.05]' : ''
               }`}
             >
               <span>
-                <span className="block text-[14px] font-medium text-[#1c1c1e]">{opt.label}</span>
-                <span className="block text-[11px] text-[#86868b]">{opt.hint}</span>
+                <span className="block text-[15px] font-semibold text-[#0d0d0f]">{opt.label}</span>
+                <span className="block text-[12px] font-medium text-[#7c7c82]">{opt.hint}</span>
               </span>
-              {preset === opt.key && <Check className="h-4 w-4 text-[#34c759]" />}
+              {preset === opt.key && <Check className="h-4 w-4 shrink-0 text-[#30d158]" strokeWidth={2.8} />}
             </button>
           ))}
         </div>
 
-        <p className="mt-4 px-1 text-[11px] leading-relaxed text-[#aeaeb2]">
+        <p className="mt-4 px-1 text-[12px] leading-relaxed text-[#a9a9b0]">
           Pico sends every stream directly to the other person — nothing is uploaded to a server.
           Audio uses Opus DTX, so silence costs almost nothing.
         </p>

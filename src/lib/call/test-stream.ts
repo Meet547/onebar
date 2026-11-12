@@ -2,50 +2,88 @@
 
 /**
  * Synthetic camera+mic used when `?test=1` is present or no capture devices
- * exist. Renders an animated scene on a canvas and captures it — lets the
- * whole pipeline (preview, tiles, WebRTC encoding) be exercised anywhere.
+ * exist. Draws the Pico waveform mark animating on an ink-black canvas —
+ * on brand, zero gradients — and adds a soft breathing tone so the voice
+ * bars visibly dance. Lets the whole pipeline (preview, tiles, WebRTC
+ * encoding, audio metering) be exercised anywhere.
  */
 export async function createTestStream(): Promise<MediaStream> {
   const canvas = document.createElement('canvas')
   canvas.width = 640
   canvas.height = 360
   const ctx = canvas.getContext('2d')!
-  let hue = 210
+
+  const BARS = [0.42, 0.62, 1, 0.72, 0.5, 0.34]
   const draw = () => {
-    hue = (hue + 1.2) % 360
-    const grad = ctx.createLinearGradient(0, 0, canvas.width, canvas.height)
-    grad.addColorStop(0, `hsl(${hue}, 55%, 93%)`)
-    grad.addColorStop(1, `hsl(${(hue + 60) % 360}, 50%, 80%)`)
-    ctx.fillStyle = grad
+    const t = Date.now() / 1000
+    // Ink background with a barely-there vignette drawn as flat fills.
+    ctx.fillStyle = '#0d0d0f'
     ctx.fillRect(0, 0, canvas.width, canvas.height)
-    const t = Date.now() / 300
-    const x = canvas.width / 2 + Math.sin(t) * 140
-    const y = canvas.height / 2 + Math.cos(t * 0.8) * 70
-    ctx.fillStyle = `hsl(${(hue + 120) % 360}, 45%, 42%)`
-    ctx.beginPath()
-    ctx.arc(x, y, 26, 0, Math.PI * 2)
-    ctx.fill()
-    ctx.fillStyle = 'rgba(28,28,30,0.85)'
-    ctx.font = '600 20px -apple-system, system-ui, sans-serif'
+
+    const n = BARS.length
+    const bw = 14
+    const gap = 18
+    const total = n * bw + (n - 1) * gap
+    let x = (canvas.width - total) / 2
+    const cy = canvas.height / 2
+
+    for (let i = 0; i < n; i++) {
+      const wave = 0.55 + 0.45 * Math.sin(t * 2.4 + i * 0.9)
+      const h = BARS[i] * 150 * wave
+      const shift = Math.sin(t * 0.7 + i) * 6
+      ctx.fillStyle = i === 2 ? '#30d158' : 'rgba(255,255,255,0.92)'
+      const bx = x + shift
+      const by = cy - h / 2
+      const r = bw / 2
+      ctx.beginPath()
+      ctx.moveTo(bx + r, by)
+      ctx.arcTo(bx + bw, by, bx + bw, by + h, r)
+      ctx.arcTo(bx + bw, by + h, bx, by + h, r)
+      ctx.arcTo(bx, by + h, bx, by, r)
+      ctx.arcTo(bx, by, bx + bw, by, r)
+      ctx.closePath()
+      ctx.fill()
+      x += bw + gap
+    }
+
+    ctx.fillStyle = 'rgba(255,255,255,0.55)'
+    ctx.font = '600 17px Manrope, -apple-system, system-ui, sans-serif'
     ctx.textAlign = 'center'
-    ctx.fillText('Pico test stream', canvas.width / 2, 44)
-    ctx.fillText(new Date().toLocaleTimeString(), canvas.width / 2, canvas.height - 30)
+    ctx.fillText('Pico test signal', canvas.width / 2, 56)
+    ctx.fillStyle = 'rgba(255,255,255,0.3)'
+    ctx.font = '500 13px Geist Mono, monospace'
+    ctx.fillText(new Date().toLocaleTimeString(), canvas.width / 2, canvas.height - 34)
   }
   draw()
   const timer = window.setInterval(draw, 80)
   const stream = canvas.captureStream(12)
 
-  // Silent audio track keeps audio transceivers realistic without any noise
+  // A soft tone with a slow tremolo — gives the voice meter something honest to show.
   let audioCtx: AudioContext | null = null
   try {
     audioCtx = new AudioContext()
+    // Autoplay policy: contexts created before a gesture start suspended.
+    // Resume on the first interaction so the signal (and the voice meter) comes alive.
+    const resume = () => void audioCtx?.resume().catch(() => undefined)
+    resume()
+    document.addEventListener('pointerdown', resume, { once: true })
+    document.addEventListener('keydown', resume, { once: true })
     const osc = audioCtx.createOscillator()
+    osc.type = 'sine'
+    osc.frequency.value = 196
     const gain = audioCtx.createGain()
-    gain.gain.value = 0
+    const tremolo = audioCtx.createOscillator()
+    tremolo.frequency.value = 0.45
+    const depth = audioCtx.createGain()
+    depth.gain.value = 0.05
+    tremolo.connect(depth)
+    depth.connect(gain.gain)
+    gain.gain.value = 0.12
     const dest = audioCtx.createMediaStreamDestination()
     osc.connect(gain)
     gain.connect(dest)
     osc.start()
+    tremolo.start()
     const audioTrack = dest.stream.getAudioTracks()[0]
     if (audioTrack) stream.addTrack(audioTrack)
   } catch {

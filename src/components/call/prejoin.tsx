@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { ArrowLeft, Mic, MicOff, Video, VideoOff, Loader2 } from 'lucide-react'
+import { ArrowLeft, Loader2, Mic, MicOff, Video, VideoOff } from 'lucide-react'
 import { useCallStore } from '@/lib/call/store'
 import { createTestStream } from '@/lib/call/test-stream'
 
@@ -95,25 +95,23 @@ export function PreJoin({ roomCode, testMode, onBack, onJoin }: PreJoinProps) {
     onJoin(streamRef.current)
   }
 
+  const initials = (displayName.trim() || 'Guest').slice(0, 2).toUpperCase()
+
   return (
     <div className="flex min-h-[100dvh] flex-col bg-white">
       <header className="flex items-center gap-3 px-5 py-4">
-        <button
-          onClick={onBack}
-          aria-label="Back"
-          className="flex h-9 w-9 items-center justify-center rounded-full bg-[#f2f2f7] text-[#1c1c1e] transition-all active:scale-90"
-        >
-          <ArrowLeft className="h-4 w-4" />
+        <button onClick={onBack} aria-label="Back" className="ios-square press h-9 w-9">
+          <ArrowLeft className="h-4 w-4" strokeWidth={2.4} />
         </button>
-        <div>
-          <h1 className="text-[16px] font-semibold text-[#1c1c1e]">Ready to join?</h1>
-          <p className="font-mono text-[12px] text-[#86868b]">{roomCode}</p>
+        <div className="min-w-0">
+          <h1 className="text-[17px] font-bold tracking-[-0.01em] text-[#0d0d0f]">Ready to join?</h1>
+          <p className="truncate font-mono text-[12px] text-[#7c7c82]">{roomCode}</p>
         </div>
       </header>
 
-      <main className="mx-auto flex w-full max-w-md flex-1 flex-col justify-center gap-5 px-5 pb-10">
+      <main className="mx-auto flex w-full max-w-[400px] flex-1 flex-col justify-center gap-5 px-5 pb-10">
         {/* Preview */}
-        <div className="relative aspect-[4/3] w-full overflow-hidden rounded-3xl border border-black/[0.06] bg-[#f5f5f7] shadow-sm">
+        <div className="pico-pop relative aspect-[4/3] w-full overflow-hidden rounded-[24px] border border-black/[0.05] bg-[#f5f5f7]">
           <video
             ref={videoRef}
             autoPlay
@@ -123,15 +121,15 @@ export function PreJoin({ roomCode, testMode, onBack, onJoin }: PreJoinProps) {
           />
           {mode === 'loading' && (
             <div className="absolute inset-0 flex items-center justify-center">
-              <Loader2 className="h-6 w-6 animate-spin text-[#aeaeb2]" />
+              <Loader2 className="h-6 w-6 animate-spin text-[#a9a9b0]" />
             </div>
           )}
           {mode !== 'loading' && mode !== 'full' && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center">
-              <div className="flex h-16 w-16 items-center justify-center rounded-full bg-[#e5e5ea] text-[20px] font-semibold text-[#6e6e73]">
-                {(displayName.trim() || 'Guest').slice(0, 2).toUpperCase()}
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-8 text-center">
+              <div className="flex h-16 w-16 items-center justify-center rounded-full bg-[#e8e8ed] text-[17px] font-bold text-[#7c7c82]">
+                {initials}
               </div>
-              <p className="text-[13px] font-medium text-[#86868b]">
+              <p className="text-[13px] font-medium leading-relaxed text-[#7c7c82]">
                 {mode === 'audio'
                   ? 'No camera found — you will join with audio only'
                   : 'No camera or mic found — you will join to listen and chat'}
@@ -140,8 +138,8 @@ export function PreJoin({ roomCode, testMode, onBack, onJoin }: PreJoinProps) {
           )}
           {mode === 'full' && !camOn && (
             <div className="absolute inset-0 flex items-center justify-center bg-[#f5f5f7]/95">
-              <div className="flex h-16 w-16 items-center justify-center rounded-full bg-[#e5e5ea] text-[20px] font-semibold text-[#6e6e73]">
-                {(displayName.trim() || 'Guest').slice(0, 2).toUpperCase()}
+              <div className="flex h-16 w-16 items-center justify-center rounded-full bg-[#e8e8ed] text-[17px] font-bold text-[#7c7c82]">
+                {initials}
               </div>
             </div>
           )}
@@ -154,20 +152,24 @@ export function PreJoin({ roomCode, testMode, onBack, onJoin }: PreJoinProps) {
             aria-label={micOn ? 'Mute microphone' : 'Unmute microphone'}
             className={`ios-control ${!micOn ? 'ios-control-active' : ''}`}
           >
-            {micOn ? <Mic className="h-5 w-5" /> : <MicOff className="h-5 w-5" />}
+            <span key={micOn ? 'on' : 'off'} className="pico-icon-swap flex">
+              {micOn ? <Mic className="h-5 w-5" strokeWidth={2.2} /> : <MicOff className="h-5 w-5" strokeWidth={2.2} />}
+            </span>
           </button>
           <button
             onClick={toggleCam}
             aria-label={camOn ? 'Turn camera off' : 'Turn camera on'}
             className={`ios-control ${!camOn ? 'ios-control-active' : ''}`}
           >
-            {camOn ? <Video className="h-5 w-5" /> : <VideoOff className="h-5 w-5" />}
+            <span key={camOn ? 'on' : 'off'} className="pico-icon-swap flex">
+              {camOn ? <Video className="h-5 w-5" strokeWidth={2.2} /> : <VideoOff className="h-5 w-5" strokeWidth={2.2} />}
+            </span>
           </button>
         </div>
 
         {/* Name */}
         <div>
-          <label htmlFor="pico-name" className="mb-1.5 block px-1 text-[12px] font-semibold text-[#86868b]">
+          <label htmlFor="pico-name" className="mb-1.5 block px-1 text-[12px] font-bold uppercase tracking-[0.08em] text-[#7c7c82]">
             Your name
           </label>
           <input
@@ -178,24 +180,20 @@ export function PreJoin({ roomCode, testMode, onBack, onJoin }: PreJoinProps) {
             placeholder="Guest"
             maxLength={24}
             autoFocus
-            className="h-12 w-full rounded-2xl border border-black/[0.06] bg-[#f2f2f7] px-4 text-[15px] text-[#1c1c1e] outline-none transition-colors placeholder:text-[#aeaeb2] focus:border-black/[0.16] focus:bg-white"
+            className="ios-field"
           />
         </div>
 
         {/* Join */}
-        <button
-          onClick={join}
-          disabled={joining}
-          className="ios-pill w-full bg-[#34c759] text-white shadow-[0_6px_20px_rgba(52,199,89,0.35)] disabled:opacity-70"
-        >
-          {joining ? <Loader2 className="h-4.5 w-4.5 animate-spin" /> : null}
+        <button onClick={join} disabled={joining} className="ios-pill w-full">
+          {joining ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
           {joining ? 'Connecting…' : 'Join call'}
         </button>
 
-        <p className="text-center text-[11.5px] leading-relaxed text-[#aeaeb2]">
+        <p className="text-center text-[12px] leading-relaxed text-[#a9a9b0]">
           Peer-to-peer call · nothing is recorded
           <br />
-          Tip: on a slow connection, pick “Data Saver” in the call's quality menu
+          On a slow connection, pick “Data Saver” inside the call
         </p>
       </main>
     </div>

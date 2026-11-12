@@ -3,6 +3,7 @@
 import { io, type Socket } from 'socket.io-client'
 import { useCallStore, setStream as putStream } from './store'
 import { createTestStream } from './test-stream'
+import { clearAllAudio, trackAudio } from './audio-levels'
 import {
   LINK_CAPS,
   QUALITY_PROFILES,
@@ -161,6 +162,7 @@ export class CallEngine {
       this.mediaMode = await this.acquireMedia()
     }
     this.applyInitialTrackState()
+    trackAudio('self', this.localStream)
 
     // ---- Room ----
     // The ack races a timeout so a dead signaling server can never hang the UI.
@@ -391,6 +393,7 @@ export class CallEngine {
       const stream = e.streams[0]
       if (!stream) return
       putStream(peerId, stream)
+      trackAudio(peerId, stream)
       useCallStore.getState().bumpPeerStream(peerId, true)
     }
 
@@ -442,6 +445,7 @@ export class CallEngine {
     this.sendersMap.delete(peerId)
     this.pendingIce.delete(peerId)
     this.links.delete(peerId)
+    trackAudio(peerId, null)
     putStream(peerId, null)
     useCallStore.getState().bumpPeerStream(peerId, false)
     useCallStore.getState().removePeer(peerId)
@@ -832,6 +836,7 @@ export class CallEngine {
     this.localStream = null
     this.cameraTrack = null
     this.micTrack = null
+    clearAllAudio()
     putStream('self', null)
     this.pcs.clear()
     this.pendingIce.clear()

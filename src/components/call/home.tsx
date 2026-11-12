@@ -2,13 +2,14 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { ArrowRight, Video, WifiHigh, Zap, ShieldCheck } from 'lucide-react'
+import { ArrowRight, ShieldCheck, SignalHigh, Zap } from 'lucide-react'
 import { generateRoomCode } from '@/lib/call/types'
+import { BrandMark } from './brand'
 
 const FEATURES = [
-  { icon: Zap, label: 'Peer-to-peer, no servers' },
-  { icon: WifiHigh, label: 'Runs on 90 kbps' },
-  { icon: ShieldCheck, label: 'Nothing recorded' },
+  { icon: Zap, label: 'Peer-to-peer · no servers' },
+  { icon: SignalHigh, label: 'Runs on one bar' },
+  { icon: ShieldCheck, label: 'Encrypted, nothing saved' },
 ]
 
 export function Home({
@@ -43,34 +44,36 @@ export function Home({
 
   return (
     <div className="flex min-h-[100dvh] flex-col bg-white">
-      <main className="mx-auto flex w-full max-w-md flex-1 flex-col justify-center px-6 py-12">
+      <main className="mx-auto flex w-full max-w-[400px] flex-1 flex-col justify-center px-6 py-12">
         {/* Brand */}
-        <div className="pico-slide-up mb-10 text-center">
-          <div className="mx-auto mb-5 flex h-[72px] w-[72px] items-center justify-center rounded-[22px] bg-[#1c1c1e] shadow-[0_10px_30px_rgba(0,0,0,0.18)]">
-            <Video className="h-8 w-8 text-white" strokeWidth={2.2} />
+        <div className="pico-rise mb-10 text-center">
+          <div className="mb-6 flex justify-center">
+            <BrandMark size={76} />
           </div>
-          <h1 className="text-[34px] font-bold tracking-tight text-[#1c1c1e]">Pico</h1>
-          <p className="mt-1.5 text-[15px] leading-relaxed text-[#86868b]">
-            Video calls that sip, not gulp.
+          <h1 className="text-[32px] font-extrabold leading-tight tracking-[-0.03em] text-[#0d0d0f]">
+            Calls that weigh
             <br />
-            Featherlight on your data, battery and CPU.
+            nothing.
+          </h1>
+          <p className="mx-auto mt-3 max-w-[300px] text-[15px] leading-relaxed text-[#7c7c82]">
+            Peer-to-peer video calling, tuned to run on a single bar of signal.
           </p>
         </div>
 
         {/* Actions */}
-        <div className="pico-slide-up space-y-3" style={{ animationDelay: '60ms' }}>
+        <div className="pico-rise space-y-3" style={{ animationDelay: '80ms' }}>
           {error && (
             <div
               role="alert"
-              className="mb-1 flex items-center justify-between gap-2 rounded-2xl bg-[#ff3b30]/[0.08] px-4 py-3"
+              className="pico-pop mb-1 flex items-center justify-between gap-3 rounded-2xl bg-[#ff3b30]/[0.07] px-4 py-3"
             >
-              <p className="text-[13px] font-medium text-[#ff3b30]">
-                Could not start the call. Please check your connection and try again.
+              <p className="text-[13px] font-semibold leading-snug text-[#ff3b30]">
+                Could not start the call. Check your connection and try again.
               </p>
               <button
                 onClick={onDismissError}
                 aria-label="Dismiss error"
-                className="shrink-0 text-[13px] font-semibold text-[#ff3b30]/70"
+                className="press shrink-0 text-[12px] font-bold uppercase tracking-wide text-[#ff3b30]/70"
               >
                 Dismiss
               </button>
@@ -83,21 +86,21 @@ export function Home({
             id="home-name"
             value={name}
             onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && start()}
             placeholder="Your name"
             maxLength={24}
-            className="h-12 w-full rounded-2xl border border-black/[0.06] bg-[#f2f2f7] px-4 text-[15px] text-[#1c1c1e] outline-none transition-colors placeholder:text-[#aeaeb2] focus:border-black/[0.16] focus:bg-white"
+            className="ios-field"
           />
-          <button
-            onClick={start}
-            className="ios-pill w-full bg-[#34c759] text-white shadow-[0_6px_20px_rgba(52,199,89,0.35)]"
-          >
-            Start a new call
+          <button onClick={start} className="ios-pill w-full">
+            Start a call
           </button>
 
-          <div className="flex items-center gap-3 py-1">
-            <span className="h-px flex-1 bg-[#e5e5ea]" />
-            <span className="text-[12px] font-medium text-[#aeaeb2]">or join with a code</span>
-            <span className="h-px flex-1 bg-[#e5e5ea]" />
+          <div className="flex items-center gap-3 py-1.5">
+            <span className="h-px flex-1 bg-[#e8e8ed]" />
+            <span className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[#a9a9b0]">
+              or join with a code
+            </span>
+            <span className="h-px flex-1 bg-[#e8e8ed]" />
           </div>
 
           <div className="flex gap-2">
@@ -110,35 +113,38 @@ export function Home({
               autoCapitalize="off"
               autoCorrect="off"
               spellCheck={false}
-              className="h-12 min-w-0 flex-1 rounded-2xl border border-black/[0.06] bg-[#f2f2f7] px-4 font-mono text-[15px] lowercase text-[#1c1c1e] outline-none transition-colors placeholder:text-[#aeaeb2] focus:border-black/[0.16] focus:bg-white"
+              className="ios-field min-w-0 flex-1 font-mono text-[15px] lowercase"
             />
             <button
               onClick={joinByCode}
               disabled={code.trim().length < 4}
               aria-label="Join call with code"
-              className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-[#1c1c1e] text-white transition-all active:scale-90 disabled:bg-[#e5e5ea] disabled:text-[#aeaeb2]"
+              className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-[#0d0d0f] text-white transition-all duration-[130ms] ease-[cubic-bezier(0.34,1.35,0.64,1)] hover:bg-[#26262b] active:scale-90 disabled:bg-[#e8e8ed] disabled:text-[#a9a9b0]"
             >
-              <ArrowRight className="h-5 w-5" />
+              <ArrowRight className="h-5 w-5" strokeWidth={2.4} />
             </button>
           </div>
         </div>
 
         {/* Feature strip */}
-        <div className="pico-slide-up mt-10 flex justify-center gap-2" style={{ animationDelay: '120ms' }}>
+        <div
+          className="pico-rise mt-10 flex flex-wrap justify-center gap-2"
+          style={{ animationDelay: '160ms' }}
+        >
           {FEATURES.map((f) => (
             <div
               key={f.label}
-              className="flex items-center gap-1.5 rounded-full border border-black/[0.05] bg-white px-3 py-1.5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]"
+              className="flex items-center gap-1.5 rounded-full bg-[#f5f5f7] px-3.5 py-2"
             >
-              <f.icon className="h-3.5 w-3.5 text-[#34c759]" />
-              <span className="text-[11px] font-medium text-[#86868b]">{f.label}</span>
+              <f.icon className="h-3.5 w-3.5 text-[#0d0d0f]" strokeWidth={2.4} />
+              <span className="text-[12px] font-semibold text-[#3c3c43]">{f.label}</span>
             </div>
           ))}
         </div>
       </main>
 
-      <footer className="pb-6 text-center">
-        <p className="text-[11px] text-[#aeaeb2]">
+      <footer className="pb-8 text-center">
+        <p className="text-[12px] font-medium text-[#a9a9b0]">
           No accounts · No downloads · Streams go device-to-device
           <br />
           Up to 8 people per call

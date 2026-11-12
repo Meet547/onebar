@@ -5,6 +5,7 @@ import { MicOff, MonitorUp } from 'lucide-react'
 import { getStream } from '@/lib/call/store'
 import type { PeerState } from '@/lib/call/types'
 import { NetworkBars } from './network-bars'
+import { VoiceBars, useSpeakingRing } from './brand'
 
 const AVATAR_TONES = ['#E8E3DA', '#E3EDE4', '#EAE6F2', '#F2E8E0', '#E0EBF0', '#F0E0E8']
 
@@ -30,12 +31,14 @@ interface VideoTileProps {
 /**
  * Video tile. The <video> element is created once and streams are attached
  * imperatively — streaming never causes React re-renders, keeping CPU cost
- * near zero. Presence flags (mic/cam/share/level) come in as tiny props.
+ * near zero. Presence flags (mic/cam/share/level) come in as tiny props, and
+ * voice activity is applied straight to the DOM via subscriptions.
  */
 export const VideoTile = memo(function VideoTile({ peerId, state, isSelf, large }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const streamVersion = state.streamVersion
   const { sharing, camOn, micOn, level, hasStream } = state
+  const ringRef = useSpeakingRing(peerId, micOn && !sharing)
 
   // Attach the stream whenever its identity may have changed
   useEffect(() => {
@@ -57,9 +60,10 @@ export const VideoTile = memo(function VideoTile({ peerId, state, isSelf, large 
 
   return (
     <div
-      className={`relative overflow-hidden rounded-2xl transition-colors duration-300 ${
-        showAvatar ? 'border border-black/[0.06] bg-[#f5f5f7]' : 'bg-neutral-900'
-      } ${large ? 'h-full w-full' : ''}`}
+      ref={ringRef}
+      className={`relative h-full w-full overflow-hidden rounded-[20px] transition-shadow duration-300 ${
+        showAvatar ? 'border border-black/[0.06] bg-[#f5f5f7]' : 'bg-[#0d0d0f]'
+      }`}
     >
       <video
         ref={videoRef}
@@ -75,11 +79,11 @@ export const VideoTile = memo(function VideoTile({ peerId, state, isSelf, large 
       {showAvatar && (
         <div className="absolute inset-0 flex items-center justify-center">
           <div
-            className="flex items-center justify-center rounded-full font-semibold text-[#6e6e73]"
+            className="flex items-center justify-center rounded-full font-bold text-[#6e6e73] transition-transform duration-300"
             style={{
               width: large ? 96 : 56,
               height: large ? 96 : 56,
-              fontSize: large ? 30 : 18,
+              fontSize: large ? 26 : 15,
               backgroundColor: toneFor(peerId),
             }}
           >
@@ -88,11 +92,15 @@ export const VideoTile = memo(function VideoTile({ peerId, state, isSelf, large 
         </div>
       )}
 
-      {/* Name + mic chip */}
-      <div className="absolute bottom-2 left-2 flex max-w-[calc(100%-16px)] items-center gap-1.5 rounded-full bg-black/45 px-2.5 py-1 backdrop-blur-md">
-        {!micOn && <MicOff className="h-3 w-3 shrink-0 text-[#ff453a]" aria-hidden />}
-        {sharing && <MonitorUp className="h-3 w-3 shrink-0 text-white" aria-hidden />}
-        <span className="truncate text-[11px] font-medium text-white">
+      {/* Name + live mic meter */}
+      <div className="absolute bottom-2 left-2 flex max-w-[calc(100%-16px)] items-center gap-2 rounded-full bg-[#0d0d0f]/60 py-1.5 pl-2.5 pr-3 backdrop-blur-md">
+        {micOn ? (
+          <VoiceBars peerId={peerId} />
+        ) : (
+          <MicOff className="h-3 w-3 shrink-0 text-[#ff6961]" aria-hidden strokeWidth={2.6} />
+        )}
+        {sharing && <MonitorUp className="h-3 w-3 shrink-0 text-white" aria-hidden strokeWidth={2.6} />}
+        <span className="truncate text-[12px] font-semibold text-white">
           {state.name}
           {isSelf ? ' (You)' : ''}
         </span>
@@ -100,7 +108,7 @@ export const VideoTile = memo(function VideoTile({ peerId, state, isSelf, large 
 
       {/* Network quality (remote peers only) */}
       {!isSelf && (
-        <div className="absolute right-2 top-2 rounded-full bg-black/35 px-1.5 py-1.5 backdrop-blur-md">
+        <div className="absolute right-2 top-2 rounded-full bg-[#0d0d0f]/45 px-2 py-1.5 backdrop-blur-md">
           <NetworkBars level={level} />
         </div>
       )}
