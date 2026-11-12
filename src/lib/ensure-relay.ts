@@ -63,11 +63,13 @@ async function spawnRelay(): Promise<void> {
   }
   await new Promise<void>((resolve) => {
     try {
-      const child = spawn('bun', ['run', 'dev'], {
+      // Plain `bun index.ts` — no --hot watcher in the supervision path, one
+      // less subsystem that can fail. The keeper itself provides healing.
+      const child = spawn('bun', ['index.ts'], {
         cwd: relayDir,
         detached: true,
         stdio: logFd !== undefined ? ['ignore', logFd, logFd] : 'ignore',
-        env: { ...process.env, PORT: '3003', INFO_PORT: '3004' },
+        env: { ...process.env, PORT: '3003', INFO_PORT: '3004', SOCKET_PATH: '/' },
       })
       child.on('error', () => resolve())
       child.unref()

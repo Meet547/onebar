@@ -227,7 +227,7 @@ export class CallEngine {
    */
   private async connectSignaling(forceIce: boolean): Promise<Socket> {
     this.iceServers = await fetchIceServers(forceIce)
-    const socket = io(SIGNALING_URL, {
+    const opts = {
       path: SOCKET_PATH,
       transports: ['polling', 'websocket'],
       upgrade: true,
@@ -236,7 +236,11 @@ export class CallEngine {
       reconnectionDelay: 1000,
       reconnectionDelayMax: 4000,
       timeout: 10000,
-    })
+    }
+    // Empty SIGNALING_URL = connect to the origin the page was loaded from —
+    // preview proxy, gateway or direct, they all serve the app, so they all
+    // serve signaling too (Next rewrites /signal/* to the relay).
+    const socket = SIGNALING_URL ? io(SIGNALING_URL, opts) : io(opts)
     this.socket = socket
     // Dev/debug handle (harmless in prod, invaluable for live diagnostics)
     if (typeof window !== 'undefined') {
@@ -274,6 +278,25 @@ export class CallEngine {
     return socket
   }
 
+  /**
+   * Up to four connect attempts inside one join. Every attempt after the
+   * first force-refreshes /api/ice, which (server-side) revives a dead relay
+   * and waits for it to listen before replying — so a cold or flapping relay
+   * is healed mid-join instead of surfacing an error to the user.
+   */
+  private async connectWithRetry(): Promise<Socket> {
+    let lastErr: unknown
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        return await this.connectSignaling(attempt > 0)
+      } catch (err) {
+        lastErr = err
+        if (attempt < 3) await new Promise((r) => setTimeout(r, attempt === 0 ? 1_200 : 500))
+      }
+    }
+    throw lastErr instanceof Error ? lastErr : new Error('relay unreachable')
+  }
+
   /* listen together */
   private musicSource: MusicSource | null = null
   private musicHandleStop: (() => void) | null = null
@@ -304,20 +327,14 @@ export class CallEngine {
     // /api/ice hands out TURN/STUN *and* (server-side) waits for the relay to
     // listen before it answers; connectSignaling() then resolves only once the
     // socket is genuinely connected. A relay lost to a recycled box / dev
-    // restart heals right here — one controlled retry, invisible to the user.
+    // restart heals right here — the retry loop nudges the keeper server-side
+    // on every attempt, so a transient outage never becomes a dead end.
     let socket: Socket
     try {
-      socket = await this.connectSignaling(false)
+      socket = await this.connectWithRetry()
     } catch {
-      // Second and last attempt: the keeper has now been nudged twice
-      // server-side; give it a breath, force-refresh ICE, reconnect fresh.
-      await new Promise((r) => setTimeout(r, 1_200))
-      try {
-        socket = await this.connectSignaling(true)
-      } catch {
-        await this.cleanupAfterFailedJoin()
-        throw new Error('Could not reach the call relay. Check your connection and try again.')
-      }
+      await this.cleanupAfterFailedJoin()
+      throw new Error('Could not reach the call relay. Check your connection and try again.')
     }
 
     // ---- Local media ----

@@ -514,6 +514,14 @@ infoServer.listen(INFO_PORT, () => {
   console.log(`Pico room-info + health probe on :${INFO_PORT}`)
 })
 
+// Never die silently — every failure leaves a trace in relay.log.
+httpServer.on('error', (err) => console.error('[relay] http server error:', err.message))
+infoServer.on('error', (err) => console.error('[relay] info server error:', err.message))
+process.on('uncaughtException', (err) => console.error('[relay] uncaught exception:', err?.stack ?? err))
+process.on('unhandledRejection', (err) =>
+  console.error('[relay] unhandled rejection:', err instanceof Error ? err.stack : err),
+)
+
 process.on('SIGTERM', () => {
   httpServer.close(() => process.exit(0))
   infoServer.close(() => process.exit(0))
