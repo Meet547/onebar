@@ -163,11 +163,21 @@ export class CallEngine {
     this.applyInitialTrackState()
 
     // ---- Room ----
+    // The ack races a timeout so a dead signaling server can never hang the UI.
     await new Promise<void>((resolve) => {
+      let settled = false
+      const finish = () => {
+        if (!settled) {
+          settled = true
+          resolve()
+        }
+      }
+      const guard = window.setTimeout(finish, 12000)
       socket.emit(
         'room:join',
         { roomId: this.roomId, name: opts.name },
         (res: { ok: boolean; self?: { id: string }; peers?: Array<{ id: string; name: string; micOn: boolean; camOn: boolean; sharing: boolean }>; reason?: string }) => {
+          window.clearTimeout(guard)
           if (!res?.ok) {
             useCallStore.getState().addChat({
               id: 'sys-' + Date.now(),
@@ -181,7 +191,7 @@ export class CallEngine {
           this.myId = res?.self?.id ?? socket.id!
           useCallStore.getState().setSelf({ id: this.myId })
           if (res?.peers) this.reconcilePeers(res.peers)
-          resolve()
+          finish()
         },
       )
     })
@@ -204,7 +214,11 @@ export class CallEngine {
       if (this.myId) this.reconcilePeers(peers)
     })
     socket.on('peer:state', ({ peerId, micOn, camOn, sharing }: { peerId: string; micOn: boolean; camOn: boolean; sharing: boolean }) => {
-      useCallStore.getState().patchPeer(peerId, { micOn, camOn, sharing })
+      const store = useCallStore.getState()
+      store.patchPeer(peerId, { micOn, camOn, sharing })
+      // Follow whoever is presenting, so a remote screen never hides in a small tile
+      if (sharing && store.spotlight !== peerId) store.setSpotlight(peerId)
+      else if (!sharing && store.spotlight === peerId) store.setSpotlight(null)
     })
     socket.on('chat:message', (msg: { id: string; from: string; name: string; text: string; ts: number }) => {
       useCallStore.getState().addChat(msg)
@@ -668,6 +682,7 @@ export class CallEngine {
     if (this.pcs.size === 0) return
     let overall: NetworkLevel = 3
     let totalKbps = 0
+    const nextPrev = new Map<string, number>()
 
     for (const [peerId, pc] of this.pcs) {
       if (pc.connectionState !== 'connected') {
@@ -679,7 +694,6 @@ export class CallEngine {
       let bytesDelta = 0
       try {
         const stats = await pc.getStats()
-        const nextPrev = new Map<string, number>()
         stats.forEach((report) => {
           const r = report as RTCStats & {
             currentRoundTripTime?: number
@@ -702,7 +716,6 @@ export class CallEngine {
             nextPrev.set(r.id, r.bytesSent)
           }
         })
-        this.prevBytes = nextPrev
       } catch {
         continue
       }
@@ -732,6 +745,8 @@ export class CallEngine {
         }
       }
     }
+
+    this.prevBytes = nextPrev
 
     const prevOverall = useCallStore.getState().overallLevel
     if (prevOverall !== overall) {
@@ -783,8 +798,16 @@ export class CallEngine {
     this.socket.emit(
       'room:join',
       { roomId: this.roomId, name: useCallStore.getState().self.name },
-      (res: { ok: boolean; peers?: Array<{ id: string; name: string; micOn: boolean; camOn: boolean; sharing: boolean }> }) => {
-        if (res?.ok && res.peers) this.reconcilePeers(res.peers)
+      (res: { ok: boolean; self?: { id: string }; peers?: Array<{ id: string; name: string; micOn: boolean; camOn: boolean; sharing: boolean }> }) => {
+        // The server hands out a fresh socket id after a reconnect — adopt it,
+        // otherwise our own messages and presence updates stop matching.
+        if (res?.ok) {
+          if (res.self?.id && res.self.id !== this.myId) {
+            this.myId = res.self.id
+            useCallStore.getState().setSelf({ id: res.self.id })
+          }
+          if (res.peers) this.reconcilePeers(res.peers)
+        }
       },
     )
   }

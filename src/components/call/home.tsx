@@ -11,7 +11,15 @@ const FEATURES = [
   { icon: ShieldCheck, label: 'Nothing recorded' },
 ]
 
-export function Home({ onCreate }: { onCreate: () => void }) {
+export function Home({
+  onCreate,
+  error,
+  onDismissError,
+}: {
+  onCreate: () => void
+  error?: boolean
+  onDismissError?: () => void
+}) {
   const router = useRouter()
   const [name, setName] = useState('')
   const [code, setCode] = useState('')
@@ -51,6 +59,23 @@ export function Home({ onCreate }: { onCreate: () => void }) {
 
         {/* Actions */}
         <div className="pico-slide-up space-y-3" style={{ animationDelay: '60ms' }}>
+          {error && (
+            <div
+              role="alert"
+              className="mb-1 flex items-center justify-between gap-2 rounded-2xl bg-[#ff3b30]/[0.08] px-4 py-3"
+            >
+              <p className="text-[13px] font-medium text-[#ff3b30]">
+                Could not start the call. Please check your connection and try again.
+              </p>
+              <button
+                onClick={onDismissError}
+                aria-label="Dismiss error"
+                className="shrink-0 text-[13px] font-semibold text-[#ff3b30]/70"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
           <label htmlFor="home-name" className="sr-only">
             Your name
           </label>

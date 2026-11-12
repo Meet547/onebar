@@ -19,6 +19,7 @@ function PicoApp() {
 
   const [view, setView] = useState<View>(urlRoom ? 'prejoin' : 'home')
   const [roomCode, setRoomCode] = useState(urlRoom)
+  const [joinError, setJoinError] = useState(false)
 
   const previewRef = useRef<MediaStream | null>(null)
 
@@ -50,16 +51,24 @@ function PicoApp() {
   const joinWithStream = useCallback(
     async (stream: MediaStream | null) => {
       previewRef.current = stream
-      const name = window.localStorage.getItem('pico-name') || 'Guest'
-      await getEngine().start({
-        roomId: roomCode,
-        name,
-        preset: 'balanced',
-        initialStream: stream,
-        testMode,
-      })
-      previewRef.current = null // engine now owns the stream
-      setView('room')
+      try {
+        const name = window.localStorage.getItem('pico-name') || 'Guest'
+        await getEngine().start({
+          roomId: roomCode,
+          name,
+          preset: 'balanced',
+          initialStream: stream,
+          testMode,
+        })
+        previewRef.current = null // engine now owns the stream
+        setView('room')
+      } catch {
+        // Engine surfaced a hard failure — release the mic/cam and back out.
+        stream?.getTracks().forEach((t) => t.stop())
+        previewRef.current = null
+        setJoinError(true)
+        setView('home')
+      }
     },
     [roomCode, testMode],
   )
@@ -76,7 +85,7 @@ function PicoApp() {
   }, [urlRoom, testMode])
 
   if (view === 'home') {
-    return <Home onCreate={create} />
+    return <Home onCreate={create} error={joinError} onDismissError={() => setJoinError(false)} />
   }
 
   if (view === 'prejoin') {

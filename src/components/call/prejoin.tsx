@@ -138,7 +138,7 @@ export function PreJoin({ roomCode, testMode, onBack, onJoin }: PreJoinProps) {
               </p>
             </div>
           )}
-          {(camOn ? mode !== 'full' : true) && mode !== 'loading' && (
+          {mode === 'full' && !camOn && (
             <div className="absolute inset-0 flex items-center justify-center bg-[#f5f5f7]/95">
               <div className="flex h-16 w-16 items-center justify-center rounded-full bg-[#e5e5ea] text-[20px] font-semibold text-[#6e6e73]">
                 {(displayName.trim() || 'Guest').slice(0, 2).toUpperCase()}
