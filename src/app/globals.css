@@ -1,0 +1,235 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  /* iOS system palette */
+  --color-ios-green: #34c759;
+  --color-ios-red: #ff3b30;
+  --color-ios-gray: #f2f2f7;
+  --color-ios-gray2: #e5e5ea;
+  --color-ios-label: #1c1c1e;
+  --color-ios-secondary: #86868b;
+  --color-ios-tertiary: #aeaeb2;
+}
+
+:root {
+  --radius: 0.875rem;
+  --background: #ffffff;
+  --foreground: #1c1c1e;
+  --card: #ffffff;
+  --card-foreground: #1c1c1e;
+  --popover: #ffffff;
+  --popover-foreground: #1c1c1e;
+  --primary: #1c1c1e;
+  --primary-foreground: #ffffff;
+  --secondary: #f2f2f7;
+  --secondary-foreground: #1c1c1e;
+  --muted: #f2f2f7;
+  --muted-foreground: #86868b;
+  --accent: #f2f2f7;
+  --accent-foreground: #1c1c1e;
+  --destructive: #ff3b30;
+  --border: #e5e5ea;
+  --input: #e5e5ea;
+  --ring: #aeaeb2;
+  --chart-1: #34c759;
+  --chart-2: #1c1c1e;
+  --chart-3: #aeaeb2;
+  --chart-4: #ff9500;
+  --chart-5: #ff3b30;
+  --sidebar: #ffffff;
+  --sidebar-foreground: #1c1c1e;
+  --sidebar-primary: #1c1c1e;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #f2f2f7;
+  --sidebar-accent-foreground: #1c1c1e;
+  --sidebar-border: #e5e5ea;
+  --sidebar-ring: #aeaeb2;
+}
+
+.dark {
+  --background: #1c1c1e;
+  --foreground: #f2f2f7;
+  --card: #2c2c2e;
+  --card-foreground: #f2f2f7;
+  --popover: #2c2c2e;
+  --popover-foreground: #f2f2f7;
+  --primary: #f2f2f7;
+  --primary-foreground: #1c1c1e;
+  --secondary: #2c2c2e;
+  --secondary-foreground: #f2f2f7;
+  --muted: #2c2c2e;
+  --muted-foreground: #aeaeb2;
+  --accent: #2c2c2e;
+  --accent-foreground: #f2f2f7;
+  --destructive: #ff453a;
+  --border: #3a3a3c;
+  --input: #3a3a3c;
+  --ring: #636366;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+}
+
+/* ---------- Pico iOS helpers ---------- */
+
+/* Frosted-glass bar, like iOS control center */
+.glass {
+  background: rgba(255, 255, 255, 0.72);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
+}
+.glass-dark {
+  background: rgba(28, 28, 30, 0.55);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
+}
+
+/* iOS-style circular control button */
+.ios-control {
+  @apply relative flex h-[52px] w-[52px] items-center justify-center rounded-full
+    border border-black/[0.06] bg-white text-[#1c1c1e] shadow-[0_1px_4px_rgba(0,0,0,0.08)]
+    transition-all duration-150 ease-out;
+}
+.ios-control:active {
+  transform: scale(0.88);
+}
+.ios-control-active {
+  @apply border-transparent bg-[#1c1c1e] text-white;
+}
+.ios-control-danger {
+  @apply border-transparent bg-[#ff3b30] text-white;
+}
+
+/* iOS pill button */
+.ios-pill {
+  @apply inline-flex h-12 items-center justify-center gap-2 rounded-full px-7 text-[15px]
+    font-semibold transition-all duration-150 ease-out select-none;
+}
+.ios-pill:active {
+  transform: scale(0.96);
+}
+
+/* iOS segmented control */
+.ios-segment {
+  @apply flex rounded-[10px] bg-[#f2f2f7] p-[2px];
+}
+.ios-segment-item {
+  @apply flex-1 rounded-[8px] px-3 py-[6px] text-[13px] font-medium text-[#86868b]
+    transition-all duration-150;
+}
+.ios-segment-item[data-active='true'] {
+  @apply bg-white text-[#1c1c1e] shadow-[0_1px_3px_rgba(0,0,0,0.12)];
+}
+
+/* Thin iOS scrollbar */
+.ios-scroll::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+.ios-scroll::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.18);
+  border-radius: 999px;
+}
+.ios-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.ios-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.18) transparent;
+}
+
+/* Safe area for notched phones */
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Subtle entrance for panels and tiles */
+@keyframes pico-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.pico-pop {
+  animation: pico-pop 0.22s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+
+@keyframes pico-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.pico-slide-up {
+  animation: pico-slide-up 0.28s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+
+/* Breathing pulse for the live dot */
+@keyframes pico-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.pico-pulse {
+  animation: pico-pulse 2s ease-in-out infinite;
+}
