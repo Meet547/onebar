@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createHmac } from 'crypto'
+import { ensureRelayAlive } from '@/lib/ensure-relay'
 
 /**
  * ICE configuration endpoint.
@@ -31,6 +32,11 @@ const STUN_SERVERS: Array<{ urls: string[] }> = [
 const noStore = { 'Cache-Control': 'no-store' } as const
 
 export async function GET() {
+  // The app calls this on every join — the perfect moment to revive a relay
+  // that died (sandbox cold boots). No-op when it is healthy; disabled in the
+  // Docker production stack via PICO_EMBEDDED_RELAY=0.
+  if (process.env.PICO_EMBEDDED_RELAY !== '0') ensureRelayAlive()
+
   const urls = (process.env.TURN_URLS ?? '')
     .split(',')
     .map((s) => s.trim())

@@ -31,6 +31,9 @@ services:
       # needs a dedicated IP — see DEPLOY.md.)
       - TURN_URLS=turn:${PICO_DOMAIN}:3478?transport=udp,turn:${PICO_DOMAIN}:3478?transport=tcp
       - TURN_SECRET=${TURN_SECRET}
+      # The relay is its own supervised container here — the in-app keeper
+      # would find no source tree to spawn and is switched off.
+      - PICO_EMBEDDED_RELAY=0
     networks:
       - pico
 

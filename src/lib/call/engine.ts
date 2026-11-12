@@ -240,14 +240,19 @@ export class CallEngine {
     this.iceServers = await fetchIceServers()
 
     // ---- Signaling ----
+    // Polling-first is deliberate: the initial handshake rides plain HTTP,
+    // which survives every proxy, VPN and captive portal on the planet, then
+    // socket.io transparently upgrades to websocket. Websocket-first dead-ends
+    // behind proxies that block or hang upgrades — there is no downgrade path.
     const socket = io(SIGNALING_URL, {
       path: SOCKET_PATH,
-      transports: ['websocket', 'polling'],
+      transports: ['polling', 'websocket'],
+      upgrade: true,
       reconnection: true,
       reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 4000,
-      timeout: 8000,
+      timeout: 10000,
     })
     this.socket = socket
     // Dev/debug handle (harmless in prod, invaluable for live diagnostics)
@@ -287,7 +292,10 @@ export class CallEngine {
           resolve(r)
         }
       }
-      const guard = window.setTimeout(() => finish({ ok: false, reason: 'Could not reach the call relay. Check your connection.' }), 12000)
+      const guard = window.setTimeout(
+        () => finish({ ok: false, reason: 'Could not reach the call relay. Check your connection and try again.' }),
+        12000,
+      )
       socket.emit(
         'room:join',
         { roomId: this.roomId, name: opts.name, passwordHash: this.passwordHash },
