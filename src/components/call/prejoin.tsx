@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ArrowLeft, KeyRound, Loader2, Lock, Mic, MicOff, Video, VideoOff } from 'lucide-react'
 import { useCallStore } from '@/lib/call/store'
 import { createTestStream } from '@/lib/call/test-stream'
+import { ROOM_INFO_URL } from '@/lib/call/config'
 
 type PreviewMode = 'loading' | 'full' | 'audio' | 'none'
 
@@ -19,8 +20,10 @@ interface PreJoinProps {
   testMode: boolean
   joinError?: string | null
   onBack: () => void
-  /** Receives ownership of the preview stream (engine will stop it on leave). */
-  onJoin: (stream: MediaStream | null, passcode: string) => void
+  /** Receives ownership of the preview stream (engine will stop it on leave).
+   *  Rejects (or resolves) when the attempt is over — failed attempts keep the
+   *  caller on this screen with a live preview, ready to retry. */
+  onJoin: (stream: MediaStream | null, passcode: string) => boolean | void | Promise<boolean | void>
 }
 
 export function PreJoin({ roomCode, testMode, joinError, onBack, onJoin }: PreJoinProps) {
@@ -45,7 +48,7 @@ export function PreJoin({ roomCode, testMode, joinError, onBack, onJoin }: PreJo
     let cancelled = false
 
     // Ask the relay what this room expects — passcode, lock status.
-    const info = fetch(`/info?XTransformPort=3004&room=${encodeURIComponent(roomCode)}`)
+    const info = fetch(`${ROOM_INFO_URL}${ROOM_INFO_URL.includes('?') ? '&' : '?'}room=${encodeURIComponent(roomCode)}`)
       .then((r) => (r.ok ? r.json() : null))
       .catch(() => null)
     void info.then((data: RoomInfo | null) => {
@@ -110,7 +113,19 @@ export function PreJoin({ roomCode, testMode, joinError, onBack, onJoin }: PreJo
     window.localStorage.setItem('pico-name', clean)
     setJoining(true)
     handedOff.current = true
-    onJoin(streamRef.current, passcode.trim())
+    Promise.resolve(onJoin(streamRef.current, passcode.trim()))
+      .then((ok) => {
+        if (ok !== false) return // success — the engine owns the stream now
+        // A rejected attempt (wrong passcode, locked, full room) lands back on
+        // this screen: re-arm the button and keep the preview alive so the
+        // user can simply fix the passcode and try again.
+        setJoining(false)
+        handedOff.current = false
+      })
+      .catch(() => {
+        setJoining(false)
+        handedOff.current = false
+      })
   }
 
   const initials = (displayName.trim() || 'Guest').slice(0, 2).toUpperCase()

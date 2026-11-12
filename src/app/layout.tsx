@@ -14,18 +14,38 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
-/** Waveform app mark — black tile, white bars, one green voice bar. */
-const ICON = encodeURIComponent(
-  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="16" fill="#0d0d0f"/><rect x="14" y="26" width="5" height="12" rx="2.5" fill="#fff"/><rect x="23" y="20" width="5" height="24" rx="2.5" fill="#fff"/><rect x="32" y="14" width="5" height="36" rx="2.5" fill="#30d158"/><rect x="41" y="22" width="5" height="20" rx="2.5" fill="#fff"/><rect x="50" y="28" width="5" height="8" rx="2.5" fill="#fff"/></svg>`,
-);
+const TITLE = "Pico — calls that weigh nothing";
+const DESCRIPTION =
+  "Peer-to-peer video calling that sips data, battery and CPU. Built to work on a single bar of signal. No accounts, no downloads, nothing recorded.";
 
 export const metadata: Metadata = {
-  title: "Pico — calls that weigh nothing",
-  description:
-    "Peer-to-peer video calling that sips data, battery and CPU. Built to work on a single bar of signal. No accounts, no downloads, nothing recorded.",
+  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"),
+  title: TITLE,
+  description: DESCRIPTION,
   keywords: ["video call", "p2p", "webrtc", "lightweight", "low bandwidth", "meeting"],
+  // Referrer-Policy is no-referrer (see next.config.ts) — the room code in the
+  // URL never leaves the browser via Referer headers.
+  manifest: "/manifest.webmanifest",
   icons: {
-    icon: `data:image/svg+xml,${ICON}`,
+    icon: [
+      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
+      { url: "/icon-512.png", sizes: "512x512", type: "image/png" },
+    ],
+    apple: [{ url: "/apple-touch-icon.png", sizes: "180x180", type: "image/png" }],
+  },
+  appleWebApp: { capable: true, title: "Pico", statusBarStyle: "default" },
+  openGraph: {
+    title: TITLE,
+    description: DESCRIPTION,
+    type: "website",
+    siteName: "Pico",
+    images: [{ url: "/og.png", width: 1200, height: 630, alt: "Pico — peer-to-peer video calls" }],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: TITLE,
+    description: DESCRIPTION,
+    images: ["/og.png"],
   },
 };
 

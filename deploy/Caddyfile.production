@@ -1,0 +1,36 @@
+# Pico production gateway — automatic HTTPS via Let's Encrypt.
+#
+#   app        -> internal :3000   (Next.js)
+#   signaling  -> internal :3003   (socket.io, path /socket.io)
+#              -> internal :3004   (room-info probe + /health)
+#
+# WebSocket upgrade on /socket.io is handled automatically by Caddy.
+
+{$PICO_DOMAIN} {
+	encode zstd gzip
+
+	# Signaling relay (websocket + polling fallback)
+	handle /socket.io/* {
+		reverse_proxy signaling:3003
+	}
+	handle /socket.io {
+		reverse_proxy signaling:3003
+	}
+
+	# Room-info probe (passcode / lock / occupancy) + service health
+	handle /info* {
+		reverse_proxy signaling:3004
+	}
+	handle /healthz {
+		reverse_proxy signaling:3004
+	}
+
+	# Everything else — the Pico app
+	handle {
+		reverse_proxy app:3000
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+	}
+}

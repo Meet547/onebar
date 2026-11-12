@@ -40,8 +40,14 @@ function PicoApp() {
     const onUnload = () => {
       void getEngine().leave(true)
     }
+    // beforeunload covers desktop tab closes; pagehide covers iOS Safari and
+    // backgrounding, where beforeunload is skipped.
     window.addEventListener('beforeunload', onUnload)
-    return () => window.removeEventListener('beforeunload', onUnload)
+    window.addEventListener('pagehide', onUnload)
+    return () => {
+      window.removeEventListener('beforeunload', onUnload)
+      window.removeEventListener('pagehide', onUnload)
+    }
   }, [])
 
   // Removed by the host — tear down and show why, back on the home screen.
@@ -59,8 +65,8 @@ function PicoApp() {
   }, [testMode])
 
   const create = useCallback(
-    (passcode: string) => {
-      pendingPasscodeHash.current = passcode ? hashPasscode(passcode) : ''
+    async (passcode: string) => {
+      pendingPasscodeHash.current = passcode ? await hashPasscode(passcode) : ''
       const code = generateRoomCode()
       setRoomCode(code)
       setJoinError(null)
@@ -71,12 +77,12 @@ function PicoApp() {
   )
 
   const joinWithStream = useCallback(
-    async (stream: MediaStream | null, passcode: string) => {
+    async (stream: MediaStream | null, passcode: string): Promise<boolean> => {
       previewRef.current = stream
       setJoinError(null)
       try {
         const name = window.localStorage.getItem('pico-name') || 'Guest'
-        const hash = passcode ? hashPasscode(passcode) : pendingPasscodeHash.current
+        const hash = passcode ? await hashPasscode(passcode) : pendingPasscodeHash.current
         await getEngine().start({
           roomId: roomCode,
           name,
@@ -88,13 +94,14 @@ function PicoApp() {
         previewRef.current = null // engine now owns the stream
         pendingPasscodeHash.current = hash
         setView('room')
+        return true
       } catch (err) {
         // Rejected by the relay (wrong passcode, locked, full) — the preview
-        // stream is still alive, so stay on the pre-join screen and say why.
+        // stream stays alive so the join screen can simply retry.
         previewRef.current = null
-        stream?.getTracks().forEach((t) => t.stop())
         setJoinError(err instanceof Error ? err.message : 'Could not join the room')
         setView('prejoin')
+        return false
       }
     },
     [roomCode, testMode],
@@ -134,7 +141,7 @@ function PicoApp() {
         testMode={testMode}
         joinError={joinError}
         onBack={backToHome}
-        onJoin={(stream, passcode) => void joinWithStream(stream, passcode)}
+        onJoin={joinWithStream}
       />
     )
   }

@@ -2,6 +2,7 @@
 
 import { io, type Socket } from 'socket.io-client'
 import { toast } from 'sonner'
+import { SIGNALING_URL, SOCKET_PATH } from './config'
 import { useCallStore, setStream as putStream } from './store'
 import { createTestStream, createTestScreenStream } from './test-stream'
 import { clearAllAudio, trackAudio } from './audio-levels'
@@ -38,6 +39,37 @@ const ICE_SERVERS: RTCIceServer[] = [
   { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
   { urls: ['stun:stun.cloudflare.com:3478'] },
 ]
+
+/**
+ * ICE servers with TURN support, fetched from /api/ice. TURN is what makes
+ * calls work between strict NATs (mobile carriers, offices, hotel wifi) —
+ * without it a meaningful slice of real-world pairs can never connect.
+ * Cached for an hour; a failed fetch falls back to STUN-only, never blocks
+ * the call for more than the 4s timeout.
+ */
+const ICE_CACHE_TTL_MS = 3_600_000
+let iceCache: { servers: RTCIceServer[]; at: number } | null = null
+
+async function fetchIceServers(): Promise<RTCIceServer[]> {
+  if (iceCache && Date.now() - iceCache.at < ICE_CACHE_TTL_MS) return iceCache.servers
+  try {
+    const ctrl = new AbortController()
+    const timer = window.setTimeout(() => ctrl.abort(), 4000)
+    const res = await fetch('/api/ice', { signal: ctrl.signal, cache: 'no-store' })
+    window.clearTimeout(timer)
+    if (res.ok) {
+      const data = (await res.json()) as { iceServers?: RTCIceServer[] }
+      if (Array.isArray(data.iceServers) && data.iceServers.length > 0) {
+        iceCache = { servers: data.iceServers, at: Date.now() }
+        return iceCache.servers
+      }
+    }
+  } catch {
+    /* unreachable or slow — STUN-only still works on friendly networks */
+  }
+  iceCache = { servers: ICE_SERVERS, at: Date.now() }
+  return iceCache.servers
+}
 
 const AUDIO_SENDER_BITRATE = 24_000
 const STATS_INTERVAL_MS = 3000
@@ -163,6 +195,10 @@ export class CallEngine {
   private statsTimer: number | null = null
   private makingOffer = new Map<string, boolean>()
   private ignoreOffer = new Map<string, boolean>()
+  /** Per-peer signaling op queue — SRD/SLD calls must never interleave. */
+  private sigQueue = new Map<string, Promise<void>>()
+  /** When our last offer went out per peer — drives the renegotiation watchdog. */
+  private lastOfferAt = new Map<string, number>()
   private preset: QualityPreset = 'balanced'
   private adaptiveProfile: Exclude<QualityPreset, 'auto'> = 'balanced'
   private badCount = 0
@@ -172,6 +208,7 @@ export class CallEngine {
   private mediaMode: MediaMode = 'full'
   private prevBytes = new Map<string, number>()
   private passwordHash = ''
+  private iceServers: RTCIceServer[] = ICE_SERVERS
 
   /* listen together */
   private musicSource: MusicSource | null = null
@@ -199,9 +236,12 @@ export class CallEngine {
     store.setPreset(opts.preset)
     store.setEffectiveLabel(this.effectiveLabel())
 
+    // ---- ICE (TURN/STUN) — resolved before any peer connection is built ----
+    this.iceServers = await fetchIceServers()
+
     // ---- Signaling ----
-    const socket = io('/?XTransformPort=3003', {
-      path: '/',
+    const socket = io(SIGNALING_URL, {
+      path: SOCKET_PATH,
       transports: ['websocket', 'polling'],
       reconnection: true,
       reconnectionAttempts: Infinity,
@@ -381,34 +421,48 @@ export class CallEngine {
       toast('Someone is already sharing music', { duration: 2400 })
     })
 
-    socket.on('rtc:offer', async ({ from, sdp }: { from: string; sdp: string }) => {
-      try {
-        const pc = this.pcs.get(from)
-        if (!pc) return
-        const polite = this.myId < from
-        const offerCollision = this.makingOffer.get(from) || pc.signalingState !== 'stable'
-        this.ignoreOffer.set(from, !polite && offerCollision)
-        if (this.ignoreOffer.get(from)) return
-        await pc.setRemoteDescription({ type: 'offer', sdp: this.munge(sdp) })
-        await this.flushIce(from)
-        const answer = await pc.createAnswer()
-        answer.sdp = this.munge(answer.sdp ?? '', pc.remoteDescription?.sdp ?? '')
-        await pc.setLocalDescription(answer)
-        this.socket?.emit('rtc:answer', { to: from, sdp: pc.localDescription!.sdp })
-      } catch {
-        /* negotiation raced — next round will fix it */
-      }
+    socket.on('rtc:offer', ({ from, sdp }: { from: string; sdp: string }) => {
+      const pc = this.pcs.get(from)
+      if (!pc) return
+      const polite = this.myId < from
+      this.enqueueSig(from, async () => {
+        try {
+          // Re-evaluate glare inside the queue — the state may have moved while
+          // this op waited for the previous one.
+          const offerCollision = this.makingOffer.get(from) || pc.signalingState !== 'stable'
+          this.ignoreOffer.set(from, !polite && offerCollision)
+          if (this.ignoreOffer.get(from)) return
+          await pc.setRemoteDescription({ type: 'offer', sdp: this.munge(sdp) })
+          await this.flushIce(from)
+          const answer = await pc.createAnswer()
+          await pc.setLocalDescription({ type: 'answer', sdp: this.munge(answer.sdp ?? '', pc.remoteDescription?.sdp ?? '') })
+          const desc = pc.localDescription
+          if (desc) this.socket?.emit('rtc:answer', { to: from, sdp: desc.sdp })
+        } catch (err) {
+          // A peer that rebuilt its connection mid-session can offer a
+          // different m-line layout than ours; rebuild our side so the next
+          // offer lands on a matching PC instead of failing forever.
+          if (err instanceof Error && /m-line/i.test(err.message) && this.pcs.get(from) === pc) {
+            const info = useCallStore.getState().peers[from]
+            this.dropPeer(from)
+            this.ensurePeer(from, info?.name ?? 'Guest', info?.micOn ?? true, info?.camOn ?? true, info?.sharing ?? false)
+          }
+        }
+      })
     })
 
-    socket.on('rtc:answer', async ({ from, sdp }: { from: string; sdp: string }) => {
-      try {
-        const pc = this.pcs.get(from)
-        if (!pc || pc.signalingState !== 'have-local-offer') return
-        await pc.setRemoteDescription({ type: 'answer', sdp: this.munge(sdp, pc.localDescription?.sdp ?? '') })
-        await this.flushIce(from)
-      } catch {
-        /* ignore */
-      }
+    socket.on('rtc:answer', ({ from, sdp }: { from: string; sdp: string }) => {
+      const pc = this.pcs.get(from)
+      if (!pc) return
+      this.enqueueSig(from, async () => {
+        try {
+          if (pc.signalingState !== 'have-local-offer') return
+          await pc.setRemoteDescription({ type: 'answer', sdp: this.munge(sdp, pc.localDescription?.sdp ?? '') })
+          await this.flushIce(from)
+        } catch {
+          /* the renegotiation watchdog re-offers if the pair stays stuck */
+        }
+      })
     })
 
     socket.on('rtc:ice', ({ from, candidate }: { from: string; candidate: RTCIceCandidateInit }) => {
@@ -510,7 +564,7 @@ export class CallEngine {
     if (this.pcs.has(peerId)) return
 
     const pc = new RTCPeerConnection({
-      iceServers: ICE_SERVERS,
+      iceServers: this.iceServers,
       iceCandidatePoolSize: 4,
       bundlePolicy: 'max-bundle',
       rtcpMuxPolicy: 'require',
@@ -532,6 +586,16 @@ export class CallEngine {
           /* ignore */
         }
       }
+      // A rebuilt connection (reconnect, ICE restart) must carry the CURRENT
+      // outgoing video — if the screen is being shared, that is the screen
+      // track, not the camera that localStream still holds.
+      if (this.screenTrack && this.screenTrack.readyState === 'live' && senders.video) {
+        void senders.video.replaceTrack(this.screenTrack).catch(() => undefined)
+      }
+      // Keep camera-off cameras off on fresh connections too
+      if (!useCallStore.getState().self.camOn && !this.screenTrack) {
+        void this.setVideoSendersActive(false)
+      }
     } else {
       const at = pc.addTransceiver('audio', { direction: 'recvonly' })
       const vt = pc.addTransceiver('video', { direction: 'recvonly' })
@@ -539,6 +603,20 @@ export class CallEngine {
       senders.video = vt.sender
     }
     this.sendersMap.set(peerId, senders)
+
+    // Reserve the music m-line when this peer is the active listen-together
+    // sharer: that PC's layout is [audio, video, music], and a connection
+    // rebuilt mid-session must match it or every offer fails m-line order
+    // checks on the polite side (silent negotiation deadlock).
+    const musicPeerId = useCallStore.getState().music.peerId
+    if (musicPeerId && musicPeerId === peerId && !senders.music) {
+      try {
+        const t = pc.addTransceiver('audio', { direction: 'recvonly' })
+        senders.music = t.sender
+      } catch {
+        /* ignore */
+      }
+    }
 
     pc.onicecandidate = (e) => {
       if (e.candidate) this.socket?.emit('rtc:ice', { to: peerId, candidate: e.candidate.toJSON() })
@@ -558,18 +636,8 @@ export class CallEngine {
       useCallStore.getState().bumpPeerStream(peerId, true)
     }
 
-    pc.onnegotiationneeded = async () => {
-      try {
-        this.makingOffer.set(peerId, true)
-        const offer = await pc.createOffer()
-        await pc.setLocalDescription({ type: 'offer', sdp: this.munge(offer.sdp ?? '') })
-        const desc = pc.localDescription
-        if (desc) this.socket?.emit('rtc:offer', { to: peerId, sdp: desc.sdp })
-      } catch {
-        /* ignore */
-      } finally {
-        this.makingOffer.set(peerId, false)
-      }
+    pc.onnegotiationneeded = () => {
+      this.enqueueSig(peerId, () => this.makeOffer(peerId, pc))
     }
 
     pc.onconnectionstatechange = () => {
@@ -608,6 +676,10 @@ export class CallEngine {
     this.sendersMap.delete(peerId)
     this.pendingIce.delete(peerId)
     this.links.delete(peerId)
+    this.makingOffer.delete(peerId)
+    this.ignoreOffer.delete(peerId)
+    this.sigQueue.delete(peerId)
+    this.lastOfferAt.delete(peerId)
     trackAudio(peerId, null)
     putStream(peerId, null)
     useCallStore.getState().bumpPeerStream(peerId, false)
@@ -633,6 +705,12 @@ export class CallEngine {
     for (const id of Object.keys(store.peers)) {
       if (!seen.has(id)) this.dropPeer(id)
     }
+    // Follow whoever is presenting — also for late joiners and reconnects,
+    // not just on live peer:state events.
+    if (!store.spotlight) {
+      const presenter = peers.find((p) => p.sharing && p.id !== this.myId)
+      if (presenter) useCallStore.getState().setSpotlight(presenter.id)
+    }
     // After a reconnect, old connections may be stale — rebuild them
     for (const [peerId, pc] of this.pcs) {
       if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
@@ -654,6 +732,37 @@ export class CallEngine {
       } catch {
         /* ignore */
       }
+    }
+  }
+
+  /**
+   * Serialize signaling ops per peer. Perfect negotiation only works when
+   * setRemoteDescription / setLocalDescription never interleave — during
+   * simultaneous reconnects both peers offer at once, and an in-flight
+   * setLocalDescription makes the other side's implicit rollback reject.
+   * Without this queue that rejection was silently swallowed and the pair
+   * sat in have-local-offer forever.
+   */
+  private enqueueSig(peerId: string, op: () => Promise<void>): Promise<void> {
+    const prev = this.sigQueue.get(peerId) ?? Promise.resolve()
+    const next = prev.then(op, op)
+    this.sigQueue.set(peerId, next)
+    next.catch(() => undefined) // branch: keep the chain usable, log nothing
+    return next
+  }
+
+  private async makeOffer(peerId: string, pc: RTCPeerConnection) {
+    this.makingOffer.set(peerId, true)
+    try {
+      const offer = await pc.createOffer()
+      await pc.setLocalDescription({ type: 'offer', sdp: this.munge(offer.sdp ?? '') })
+      const desc = pc.localDescription
+      if (desc) {
+        this.lastOfferAt.set(peerId, Date.now())
+        this.socket?.emit('rtc:offer', { to: peerId, sdp: desc.sdp })
+      }
+    } finally {
+      this.makingOffer.set(peerId, false)
     }
   }
 
@@ -1083,6 +1192,17 @@ export class CallEngine {
 
   private async pollStats() {
     if (this.pcs.size === 0) return
+
+    // Signaling watchdog: an offer left hanging for 9s+ (a rare race between
+    // simultaneous reconnects) self-heals with a fresh offer.
+    for (const [peerId, pc] of this.pcs) {
+      if (pc.signalingState !== 'have-local-offer') continue
+      if (Date.now() - (this.lastOfferAt.get(peerId) ?? 0) < 9000) continue
+      if (!this.socket?.connected) continue
+      this.lastOfferAt.set(peerId, Date.now())
+      this.enqueueSig(peerId, () => this.makeOffer(peerId, pc))
+    }
+
     let overall: NetworkLevel = 3
     let totalKbps = 0
     const nextPrev = new Map<string, number>()
@@ -1204,7 +1324,7 @@ export class CallEngine {
     this.socket.emit(
       'room:join',
       { roomId: this.roomId, name: useCallStore.getState().self.name, passwordHash: this.passwordHash },
-      (res: { ok: boolean; self?: { id: string }; peers?: Array<{ id: string; name: string; micOn: boolean; camOn: boolean; sharing: boolean }>; hostId?: string; locked?: boolean }) => {
+      (res: { ok: boolean; self?: { id: string }; peers?: Array<{ id: string; name: string; micOn: boolean; camOn: boolean; sharing: boolean }>; hostId?: string; locked?: boolean; hasPassword?: boolean; music?: { peerId: string; title: string; playing: boolean; position: number; duration: number; streamId?: string } | null }) => {
         // The server hands out a fresh socket id after a reconnect — adopt it,
         // otherwise our own messages and presence updates stop matching.
         if (res?.ok) {
@@ -1214,7 +1334,42 @@ export class CallEngine {
           }
           if (res.hostId) useCallStore.getState().setHostId(res.hostId)
           useCallStore.getState().setLocked(!!res.locked)
+          useCallStore.getState().setPasscodeProtected(!!res.hasPassword)
+          // Restore the listen-together session (if it survived the reconnect)
+          // so the incoming music track is routed to the player, not a tile.
+          if (res.music?.peerId && res.music.peerId !== this.myId) {
+            this.remoteMusicStreamIds.clear()
+            if (res.music.streamId) this.remoteMusicStreamIds.add(res.music.streamId)
+            useCallStore.getState().setMusic({
+              peerId: res.music.peerId,
+              title: res.music.title,
+              playing: res.music.playing,
+              position: res.music.position,
+              duration: res.music.duration,
+            })
+          }
           if (res.peers) this.reconcilePeers(res.peers)
+          // Re-announce our live state: the server rebuilt our peer record
+          // with defaults, so everyone else must re-learn mic/cam/sharing —
+          // otherwise a mid-share reconnect drops the remote spotlight.
+          this.socket?.emit('state:update', {
+            micOn: useCallStore.getState().self.micOn,
+            camOn: useCallStore.getState().self.camOn,
+            sharing: !!(this.screenTrack && this.screenTrack.readyState === 'live'),
+          })
+          // Same for an active listen-together session: the server dropped it
+          // when our old socket left, so re-announce to restore playback for
+          // everyone (and our own late-join mapping on the next ontrack).
+          if (this.musicSource && this.musicStreamId) {
+            this.socket?.emit('music:state', {
+              action: 'start',
+              streamId: this.musicStreamId,
+              title: this.musicSource.title,
+              playing: this.musicSource.isPlaying(),
+              position: this.musicSource.getPosition(),
+              duration: this.musicSource.duration,
+            })
+          }
         }
       },
     )

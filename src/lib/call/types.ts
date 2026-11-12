@@ -46,23 +46,31 @@ export const INITIAL_MUSIC: MusicState = {
 /* ---------------- passcode gate ---------------- */
 
 /**
- * Small, fast, dependency-free hash used ONLY as a room entry gate on the
- * signaling relay. Media security does not depend on it: every packet is
- * already encrypted with DTLS-SRTP by the browser.
+ * Room-entry gate hash (SHA-256 via Web Crypto, with a deterministic fallback
+ * for non-secure contexts). The relay only compares hashes in memory — media
+ * security does not depend on it: every packet is already encrypted with
+ * DTLS-SRTP by the browser, and room ids are 9 random characters (unguessable).
  */
-export function hashPasscode(code: string): string {
+export async function hashPasscode(code: string): Promise<string> {
   const s = code.trim().toLowerCase()
-  let h1 = 0xdeadbeef
-  let h2 = 0x41c6ce57
-  for (let i = 0; i < s.length; i++) {
-    const ch = s.charCodeAt(i)
-    h1 = Math.imul(h1 ^ ch, 2654435761)
-    h2 = Math.imul(h2 ^ ch, 1597334677)
+  try {
+    if (typeof crypto !== 'undefined' && crypto.subtle) {
+      const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s))
+      return Array.from(new Uint8Array(buf))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('')
+    }
+  } catch {
+    /* fall through to the sync fallback */
   }
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909)
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909)
-  const v = 4294967296 * (2097151 & h2) + (h1 >>> 0)
-  return v.toString(16)
+  // Deterministic, self-consistent gate hash (FNV-1a, padded). Only used when
+  // Web Crypto is unavailable — both sides of the same room run the same code.
+  let h = 0x811c9dc5
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return ('fnv-' + h.toString(16) + '-' + s.length.toString(16)).padEnd(64, 'p').slice(0, 64)
 }
 
 export interface ChatMessage {

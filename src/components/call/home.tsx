@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { ArrowRight, Lock, ShieldCheck, SignalHigh, Zap } from 'lucide-react'
+import { ShieldAlert, ArrowRight, Lock, ShieldCheck, SignalHigh, Zap } from 'lucide-react'
 import { generateRoomCode } from '@/lib/call/types'
 import { BrandMark } from './brand'
 
@@ -28,9 +28,15 @@ export function Home({
   const [code, setCode] = useState('')
   const [passcode, setPasscode] = useState('')
   const [wantPasscode, setWantPasscode] = useState(false)
+  const [insecure, setInsecure] = useState(false)
 
   useEffect(() => {
-    const t = window.setTimeout(() => setName(window.localStorage.getItem('pico-name') ?? ''), 0)
+    // Cameras and microphones only open on secure origins — tell people early
+    // instead of letting them wonder why the preview stays empty.
+    const t = window.setTimeout(() => {
+      setName(window.localStorage.getItem('pico-name') ?? '')
+      setInsecure(!window.isSecureContext)
+    }, 0)
     return () => window.clearTimeout(t)
   }, [])
 
@@ -66,6 +72,18 @@ export function Home({
 
         {/* Actions */}
         <div className="pico-rise space-y-3" style={{ animationDelay: '80ms' }}>
+          {insecure && (
+            <div
+              role="alert"
+              className="pico-pop mb-1 flex items-start gap-2.5 rounded-2xl bg-[#ff9500]/[0.08] px-4 py-3"
+            >
+              <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-[#ff9500]" strokeWidth={2.4} />
+              <p className="text-[13px] font-semibold leading-snug text-[#b26a00]">
+                This page is not on HTTPS — cameras and microphones are blocked
+                here. Open Pico over HTTPS to make calls.
+              </p>
+            </div>
+          )}
           {error && (
             <div
               role="alert"
