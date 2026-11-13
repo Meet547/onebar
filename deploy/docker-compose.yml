@@ -1,0 +1,101 @@
+# Pico — full production stack: app + signaling + TURN relay + TLS gateway.
+#
+#   cp .env.example .env   (fill in PICO_DOMAIN, TURN_SECRET, TURN_PUBLIC_IP…)
+#   docker compose up -d --build
+#
+# Services
+#   app        Next.js (Pico UI)                 internal :3000
+#   signaling  socket.io relay + room-info probe internal :3003 / :3004
+#   coturn     TURN/STUN relay (NAT fallback)    host network :3478/udp+tcp, :49160-49200/udp
+#   caddy      automatic HTTPS gateway           :80, :443
+#
+# coturn uses host networking (the only reliable way to get real relay IPs);
+# everything else lives on the compose bridge network.
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.standalone
+      args:
+        NEXT_PUBLIC_SIGNALING_URL: ${PICO_SIGNALING_URL:-/}
+        NEXT_PUBLIC_SOCKET_PATH: /socket.io
+        NEXT_PUBLIC_ROOM_INFO_URL: ${PICO_ROOM_INFO_URL:-/info}
+        NEXT_PUBLIC_SITE_URL: https://${PICO_DOMAIN}
+    image: pico-app
+    restart: unless-stopped
+    expose:
+      - "3000"
+    environment:
+      # /api/ice hands these to every client. TURN runs on this host (coturn
+      # below) on 3478 UDP + TCP. (A TCP-443 fallback for extreme firewalls
+      # needs a dedicated IP — see DEPLOY.md.)
+      - TURN_URLS=turn:${PICO_DOMAIN}:3478?transport=udp,turn:${PICO_DOMAIN}:3478?transport=tcp
+      - TURN_SECRET=${TURN_SECRET}
+      # The relay is its own supervised container here — the in-app embedded
+      # relay is switched off, and the app's rewrites point at the container.
+      - PICO_EMBEDDED_RELAY=0
+      - RELAY_UPSTREAM=http://signaling:3003
+      - INFO_UPSTREAM=http://signaling:3004
+    networks:
+      - pico
+
+  signaling:
+    build: ../mini-services/signaling
+    image: pico-signaling
+    restart: unless-stopped
+    expose:
+      - "3003"
+      - "3004"
+    environment:
+      - PORT=3003
+      - INFO_PORT=3004
+      - SOCKET_PATH=/socket.io
+      - ORIGIN=https://${PICO_DOMAIN}
+    networks:
+      - pico
+
+  coturn:
+    image: coturn/coturn:latest
+    restart: unless-stopped
+    # host networking: TURN must see real client IPs and bind the UDP relay range
+    network_mode: host
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf.template:ro
+    # Substitute the template placeholders, then run coturn on the result.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        sed -e "s/{{{PICO_DOMAIN}}}/${PICO_DOMAIN}/g" \
+            -e "s/{{{TURN_SECRET}}}/${TURN_SECRET}/g" \
+            -e "s/{{{TURN_PUBLIC_IP}}}/${TURN_PUBLIC_IP}/g" \
+            /etc/coturn/turnserver.conf.template > /tmp/turnserver.conf
+        exec turnserver -c /tmp/turnserver.conf
+    # 3478/udp+tcp (TURN), 49160-49200/udp (relay range) are bound by the conf
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      - PICO_DOMAIN=${PICO_DOMAIN}
+    volumes:
+      - ./Caddyfile.production:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - pico
+    depends_on:
+      - app
+      - signaling
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  pico:

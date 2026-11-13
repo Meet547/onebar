@@ -11,6 +11,12 @@ export interface PeerState {
   level: NetworkLevel
   hasStream: boolean
   streamVersion: number
+  /**
+   * True while this peer's connection has not completed (or is being
+   * re-established). Distinct from a weak-but-connected link: the UI shows
+   * "Connecting…" instead of blaming the network quality.
+   */
+  connecting?: boolean
 }
 
 /* ---------------- music (listen together) ---------------- */

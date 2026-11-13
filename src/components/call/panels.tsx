@@ -870,7 +870,14 @@ export function QualityPanel({ onClose }: { onClose: () => void }) {
   const effective = useCallStore((s) => s.effectiveLabel)
   const bitrate = useCallStore((s) => s.bitrateKbps)
   const overall = useCallStore((s) => s.overallLevel)
+  const peers = useCallStore((s) => s.peers)
   const [pending, setPending] = useState<QualityPreset | null>(null)
+
+  // Honest status: "still dialing" is not "bad network". If no media flows
+  // yet and a peer link is still being established, say so.
+  const dialing = Object.values(peers).some((p) => p.connecting)
+  const anyMedia = Object.values(peers).some((p) => p.hasStream)
+  const statusLabel = overall === 0 && dialing && !anyMedia ? 'Connecting to peers…' : LEVEL_LABEL[overall]
 
   const choose = async (p: QualityPreset) => {
     setPending(p)
@@ -891,7 +898,7 @@ export function QualityPanel({ onClose }: { onClose: () => void }) {
           </div>
           <div className="flex items-center gap-2">
             <NetworkBars level={overall} size="md" />
-            <span className="text-[12px] font-medium text-[#7c7c82]">{LEVEL_LABEL[overall]}</span>
+            <span className="text-[12px] font-medium text-[#7c7c82]">{statusLabel}</span>
           </div>
         </div>
 

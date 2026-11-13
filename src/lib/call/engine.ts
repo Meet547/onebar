@@ -94,6 +94,14 @@ export interface StartOptions {
 
 interface LinkInfo {
   lastCap: number | null
+  /** Consecutive stats polls where this PC is not (yet) connected. */
+  deadTicks: number
+  /** ICE restarts issued in the current outage — bounded so a hopeless link
+   *  never burns the user's precious bandwidth on retry churn. */
+  restarts: number
+  /** Connected but zero inbound media bytes for a while — the one-way NAT
+   *  signature. Triggers a re-punch exactly like a dead connection. */
+  silentTicks: number
 }
 
 /** Everything the engine needs from a live music source. Optional control
@@ -212,6 +220,9 @@ export class CallEngine {
   private testMode = false
   private mediaMode: MediaMode = 'full'
   private prevBytes = new Map<string, number>()
+  private prevInbound = new Map<string, number>()
+  /** Camera capture forced to saver dims during a weak-link episode. */
+  private captureShrunk = false
   private passwordHash = ''
   private iceServers: RTCIceServer[] = ICE_SERVERS
 
@@ -644,7 +655,9 @@ export class CallEngine {
   ) {
     const store = useCallStore.getState()
     if (!store.peers[peerId]) {
-      store.upsertPeer({ id: peerId, name, micOn, camOn, sharing, level: 3, hasStream: false, streamVersion: 0 })
+      // connecting starts true for remote peers: the tile says "Connecting…"
+      // until the PC actually completes, never a misleading signal bar.
+      store.upsertPeer({ id: peerId, name, micOn, camOn, sharing, level: 3, hasStream: false, streamVersion: 0, connecting: true })
     }
     if (this.pcs.has(peerId)) return
 
@@ -655,7 +668,7 @@ export class CallEngine {
       rtcpMuxPolicy: 'require',
     })
     this.pcs.set(peerId, pc)
-    this.links.set(peerId, { lastCap: null })
+    this.links.set(peerId, { lastCap: null, deadTicks: 0, restarts: 0, silentTicks: 0 })
     this.makingOffer.set(peerId, false)
     this.ignoreOffer.set(peerId, false)
 
@@ -688,6 +701,7 @@ export class CallEngine {
       senders.video = vt.sender
     }
     this.sendersMap.set(peerId, senders)
+    this.applySenderPriorities(senders)
 
     // Reserve the music m-line when this peer is the active listen-together
     // sharer: that PC's layout is [audio, video, music], and a connection
@@ -1109,6 +1123,7 @@ export class CallEngine {
     this.pendingIce.clear()
     this.links.clear()
     this.prevBytes.clear()
+    this.prevInbound.clear()
     clearAllAudio()
     putStream('self', null)
     this.localStream = null
@@ -1341,6 +1356,76 @@ export class CallEngine {
     }
   }
 
+  /**
+   * Packet-pacer priorities, set once per sender. When a link congests,
+   * Chrome schedules audio packets ahead of video — so speech survives even
+   * when the picture has to die. This is the single most important line for
+   * "we could not even HEAR each other" on a 1-bar connection.
+   */
+  private applySenderPriorities(senders: { audio?: RTCRtpSender; video?: RTCRtpSender }) {
+    const set = (sender: RTCRtpSender | undefined, p: RTCPriorityType) => {
+      if (!sender) return
+      try {
+        const params = sender.getParameters()
+        if (!params.encodings || params.encodings.length === 0) params.encodings = [{}]
+        params.encodings[0].networkPriority = p
+        void sender.setParameters(params).catch(() => undefined)
+      } catch {
+        /* older browsers — caps below still keep audio small */
+      }
+    }
+    set(senders.audio, 'high')
+    set(senders.video, 'low')
+  }
+
+  /**
+   * Weak-link capture shrink: at the 50–110 kbps budgets a 360p picture
+   * renders as unreadable mush — 144p@10 fps is the difference between
+   * "slideshow" and "can see you". Applied instantly when any CONNECTED
+   * link degrades (a peer still dialing must not downgrade the call),
+   * restored the moment links recover. Idempotent, near-zero CPU.
+   */
+  private async shrinkCapture() {
+    if (this.captureShrunk) return
+    if (this.screenTrack && this.screenTrack.readyState === 'live') return // screen owns the senders
+    if (!this.cameraTrack || this.cameraTrack.readyState !== 'live') return
+    this.captureShrunk = true
+    try {
+      await this.cameraTrack.applyConstraints(this.videoConstraints(QUALITY_PROFILES.saver))
+    } catch {
+      /* some cameras ignore constraints — bitrate caps still apply */
+    }
+    await this.setCameraDegradation('maintain-framerate')
+  }
+
+  private async restoreCapture() {
+    if (!this.captureShrunk) return
+    this.captureShrunk = false
+    await this.setCameraDegradation('balanced')
+    await this.applyProfile()
+  }
+
+  /**
+   * degradationPreference for talking heads: under congestion keep frames
+   * flowing (lip-sync readable) and shed resolution — deliberately opposite
+   * to the screen-share policy, which keeps text sharp and sheds frames.
+   */
+  private async setCameraDegradation(preference: RTCDegradationPreference) {
+    for (const [, senders] of this.sendersMap) {
+      const sender = senders.video
+      if (!sender?.track) continue
+      try {
+        const params = sender.getParameters()
+        if (!params.encodings || params.encodings.length === 0) params.encodings = [{}]
+        ;(params as RTCRtpParameters & { degradationPreference?: RTCDegradationPreference }).degradationPreference =
+          preference
+        await sender.setParameters(params)
+      } catch {
+        /* browser may not support the parameter — caps still apply */
+      }
+    }
+  }
+
   private capAudioSender(pc: RTCPeerConnection) {
     const sender = pc.getSenders().find((s) => s.track?.kind === 'audio')
     if (!sender) return
@@ -1427,17 +1512,55 @@ export class CallEngine {
     }
 
     let overall: NetworkLevel = 3
+    /** Weakest level among CONNECTED links only — a peer still dialing must
+     *  never downgrade the media of everyone already talking. */
+    let connectedLevel: NetworkLevel | null = null
     let totalKbps = 0
     const nextPrev = new Map<string, number>()
+    const nextPrevIn = new Map<string, number>()
 
     for (const [peerId, pc] of this.pcs) {
+      const link = this.links.get(peerId)
+      const storePeer = useCallStore.getState().peers[peerId]
+
       if (pc.connectionState !== 'connected') {
-        overall = Math.min(overall, 1) as NetworkLevel
+        // Not connected is NOT "weak" — it is "still dialing" (or re-dialing).
+        // Level 0 keeps the bars honest; the tile shows "Connecting…".
+        overall = Math.min(overall, 0) as NetworkLevel
+        if (storePeer && storePeer.connecting !== true) {
+          useCallStore.getState().patchPeer(peerId, { connecting: true })
+        }
+        if (link) {
+          link.deadTicks++
+          // ICE restart ladder: first re-punch after ~6 s, then every ~9 s,
+          // at most 4 tries. Each restart re-gathers candidates — that is
+          // what recovers NAT rebinding, carrier handoffs and AP-isolation
+          // flickers without renegotiating media. Bounded so a hopeless pair
+          // (no TURN reachable) never churns the user's data plan forever.
+          if (link.deadTicks >= 2 && link.restarts < 4 && (link.deadTicks - 2) % 3 === 0) {
+            link.restarts++
+            try {
+              pc.restartIce()
+            } catch {
+              /* ignore */
+            }
+          }
+        }
         continue
       }
+
+      // (Re)connected — clear outage bookkeeping and the Connecting flag.
+      if (link) {
+        link.deadTicks = 0
+        link.restarts = 0
+        link.silentTicks = 0
+      }
+      if (storePeer?.connecting) useCallStore.getState().patchPeer(peerId, { connecting: false })
+
       let rtt: number | null = null
       let loss: number | null = null
       let bytesDelta = 0
+      let inboundDelta = 0
       try {
         const stats = await pc.getStats()
         stats.forEach((report) => {
@@ -1448,6 +1571,7 @@ export class CallEngine {
             state?: string
             nominated?: boolean
             bytesSent?: number
+            bytesReceived?: number
             kind?: string
           }
           if (r.type === 'candidate-pair' && r.state === 'succeeded' && typeof r.currentRoundTripTime === 'number') {
@@ -1461,6 +1585,11 @@ export class CallEngine {
             bytesDelta += Math.max(0, r.bytesSent - prevB)
             nextPrev.set(r.id, r.bytesSent)
           }
+          if (r.type === 'inbound-rtp' && typeof r.bytesReceived === 'number') {
+            const prevIn = this.prevInbound.get(r.id) ?? r.bytesReceived
+            inboundDelta += Math.max(0, r.bytesReceived - prevIn)
+            nextPrevIn.set(r.id, r.bytesReceived)
+          }
         })
       } catch {
         continue
@@ -1469,11 +1598,34 @@ export class CallEngine {
       const level = classifyLink(rtt, loss)
       const prevLevel = useCallStore.getState().peers[peerId]?.level
       if (prevLevel !== level) useCallStore.getState().patchPeer(peerId, { level })
+      connectedLevel = connectedLevel === null ? level : (Math.min(connectedLevel, level) as NetworkLevel)
       overall = Math.min(overall, level) as NetworkLevel
       totalKbps += (bytesDelta * 8) / (STATS_INTERVAL_MS * 1000)
 
+      // One-way media watchdog: the DTLS association is up, the peer claims
+      // to send, yet not a single byte arrived for ~15 s — the classic
+      // symmetric-NAT / hairpin-failure signature. Re-punch while the users
+      // can still see the call, instead of leaving them in silence.
+      if (link) {
+        const remoteSends = !!storePeer && (storePeer.micOn || storePeer.camOn || storePeer.sharing)
+        const stalled = remoteSends && inboundDelta === 0
+        if (stalled) {
+          link.silentTicks++
+          const dueNow = link.silentTicks === 5 || (link.silentTicks > 5 && (link.silentTicks - 5) % 3 === 0)
+          if (dueNow && link.restarts < 4) {
+            link.restarts++
+            try {
+              pc.restartIce()
+            } catch {
+              /* ignore */
+            }
+          }
+        } else {
+          link.silentTicks = 0
+        }
+      }
+
       // Adaptive per-link video cap
-      const link = this.links.get(peerId)
       const cap = LINK_CAPS[level]
       if (link && link.lastCap !== cap) {
         link.lastCap = cap
@@ -1487,6 +1639,13 @@ export class CallEngine {
             const screenLive = !!this.screenTrack && this.screenTrack.readyState === 'live'
             const base = screenLive ? this.screenCaps().maxBitrate : this.resolveProfile().maxBitrate
             params.encodings[0].maxBitrate = cap !== null ? Math.min(cap, base) : base
+            // Talking-head camera: keep frames flowing under pressure and shed
+            // resolution (only while a link cap is active — otherwise the
+            // browser's balanced default is exactly right).
+            if (!screenLive) {
+              ;(params as RTCRtpParameters & { degradationPreference?: RTCDegradationPreference }).degradationPreference =
+                cap !== null ? 'maintain-framerate' : 'balanced'
+            }
             await sender.setParameters(params)
           } catch {
             /* ignore */
@@ -1496,6 +1655,15 @@ export class CallEngine {
     }
 
     this.prevBytes = nextPrev
+    this.prevInbound = nextPrevIn
+
+    // Ultra-low-bandwidth media: when a CONNECTED link is weak or bad, drop
+    // the camera capture to 144p@10 immediately so the encoder produces a
+    // watchable picture inside the 50–110 kbps budget; restore on recovery.
+    if (connectedLevel !== null) {
+      if (connectedLevel <= 1) void this.shrinkCapture()
+      else void this.restoreCapture()
+    }
 
     const prevOverall = useCallStore.getState().overallLevel
     if (prevOverall !== overall) {
@@ -1638,6 +1806,8 @@ export class CallEngine {
     this.pendingIce.clear()
     this.links.clear()
     this.prevBytes.clear()
+    this.prevInbound.clear()
+    this.captureShrunk = false
     this.socket?.disconnect()
     this.socket = null
     this.myId = ''

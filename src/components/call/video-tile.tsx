@@ -106,12 +106,21 @@ export const VideoTile = memo(function VideoTile({ peerId, state, isSelf, large 
         </span>
       </div>
 
-      {/* Network quality (remote peers only) */}
-      {!isSelf && (
-        <div className="absolute right-2 top-2 rounded-full bg-[#0d0d0f]/45 px-2 py-1.5 backdrop-blur-md">
-          <NetworkBars level={level} />
-        </div>
-      )}
+      {/* Link state (remote peers only): never blame the network quality
+          while we are actually still dialing — say which one it is. */}
+      {!isSelf &&
+        (state.connecting ? (
+          <div className="absolute right-2 top-2 flex items-center gap-1.5 rounded-full bg-[#0d0d0f]/45 px-2.5 py-1.5 backdrop-blur-md">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#ff9500]" aria-hidden />
+            <span className="text-[10px] font-bold uppercase tracking-wide text-white/90">
+              {hasStream ? 'Reconnecting…' : 'Connecting…'}
+            </span>
+          </div>
+        ) : (
+          <div className="absolute right-2 top-2 rounded-full bg-[#0d0d0f]/45 px-2 py-1.5 backdrop-blur-md">
+            <NetworkBars level={level} />
+          </div>
+        ))}
     </div>
   )
 })
