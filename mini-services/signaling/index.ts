@@ -89,6 +89,8 @@ interface ChatMessage {
   text: string
   ts: number
   system?: boolean
+  /** Plain-text quote snapshot when the message is a reply. */
+  replyTo?: { id: string; name: string; text: string }
 }
 
 interface MusicSession {
@@ -488,12 +490,22 @@ io.on('connection', (socket: Socket) => {
     const data = (raw ?? {}) as Record<string, unknown>
     const text = safeString(data.text, 500).trim()
     if (!text) return
+    // Reply quotes are an optional plain-text snapshot, re-sanitized here so
+    // no client can smuggle oversized/typed payloads through the room.
+    let replyTo: ChatMessage['replyTo']
+    const rt = data.replyTo as Record<string, unknown> | undefined
+    if (rt && typeof rt === 'object') {
+      const rid = safeString(rt.id, 16)
+      const rtext = safeString(rt.text, 140).trim()
+      if (rid && rtext) replyTo = { id: rid, name: safeString(rt.name, 24) || 'Guest', text: rtext }
+    }
     const msg: ChatMessage = {
       id: Math.random().toString(36).slice(2, 11),
       from: peer.id,
       name: peer.name,
       text,
       ts: Date.now(),
+      ...(replyTo ? { replyTo } : {}),
     }
     io.to(currentRoom).emit('chat:message', msg)
   })

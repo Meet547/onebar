@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowUp,
   CameraOff,
@@ -19,8 +19,11 @@ import {
   Music2,
   Pause,
   Play,
+  Radio,
+  Reply,
   ServerOff,
   ShieldCheck,
+  Smile,
   Square,
   UserMinus,
   Users,
@@ -29,7 +32,7 @@ import {
 } from 'lucide-react'
 import { useCallStore } from '@/lib/call/store'
 import { getEngine } from '@/lib/call/engine'
-import { type QualityPreset } from '@/lib/call/types'
+import { type ChatMessage, type QualityPreset } from '@/lib/call/types'
 import { createFileMusicHandle, createTestMusicHandle, setRemoteMusicVolume, type MusicHandle } from '@/lib/call/music'
 import { NetworkBars, LEVEL_LABEL } from './network-bars'
 
@@ -67,10 +70,119 @@ function Sheet({
 /* Chat                                                                 */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Native-Unicode emoji picker — zero dependencies, zero network, mounted only
+ * while open (a closed picker costs literally nothing). Categories are short
+ * curated lists instead of the full Unicode table: instant render, no
+ * virtualizer, no emoji font download (the OS emoji font already ships them).
+ */
+const EMOJI_GROUPS: Array<{ name: string; emojis: string[] }> = [
+  {
+    name: 'Smileys',
+    emojis: ['😀', '😂', '🤣', '😊', '😍', '😘', '😎', '🤩', '🥳', '😏', '😢', '😭', '😤', '😡', '🤔', '😅', '😬', '🥺', '😴', '🤯', '😱', '🤗', '🤫', '🤝'],
+  },
+  {
+    name: 'Gestures',
+    emojis: ['👍', '👎', '👌', '✌️', '🤞', '🤟', '🤙', '👋', '🙌', '👏', '🙏', '💪', '🫡', '🫶', '✍️', '🤌', '👈', '👉', '👆', '👇', '☝️', '🖐️', '🤚', '🖖'],
+  },
+  {
+    name: 'Fun',
+    emojis: ['❤️', '🧡', '💛', '💚', '💙', '💜', '🖤', '🔥', '✨', '🎉', '🎉', '💯', '⚡', '⭐', '🌟', '💥', '💫', '🎊', '🎁', '🏆', '🎯', '🎮', '🎧', '🎵'],
+  },
+  {
+    name: 'Critters',
+    emojis: ['🐶', '🐱', '🐭', '🐹', '🐰', '🦊', '🐻', '🐼', '🐨', '🐯', '🦁', '🐮', '🐷', '🐸', '🐵', '🦄', '🐦', '🐧', '🦆', '🦉', '🐝', '🦋', '🐢', '🐙'],
+  },
+  {
+    name: 'Food',
+    emojis: ['☕', '🍵', '🥤', '🍺', '🍕', '🍔', '🍟', '🌮', '🍣', '🍜', '🍩', '🍪', '🎂', '🍫', '🍿', '🍎', '🍌', '🍓', '🥑', '🥕', '🌽', '🧀', '🍞', '🥐'],
+  },
+  {
+    name: 'Work',
+    emojis: ['💻', '🖥️', '⌨️', '🖱️', '📱', '☎️', '📧', '📝', '📌', '📎', '📁', '🔍', '🔧', '🔨', '💡', '🔋', '🛠️', '📊', '📈', '🗓️', '⏰', '🔔', '🔗', '✅'],
+  },
+]
+
+const EMOJI_RECENTS_KEY = 'pico-emoji-recents'
+
+function loadRecentEmojis(): string[] {
+  try {
+    const raw = localStorage.getItem(EMOJI_RECENTS_KEY)
+    const list = raw ? (JSON.parse(raw) as unknown) : []
+    return Array.isArray(list) ? (list.filter((e) => typeof e === 'string') as string[]).slice(0, 16) : []
+  } catch {
+    return []
+  }
+}
+
+function EmojiPicker({ onPick, onClose }: { onPick: (e: string) => void; onClose: () => void }) {
+  const [group, setGroup] = useState(0)
+  const [recent, setRecent] = useState<string[]>(loadRecentEmojis)
+
+  const pick = (e: string) => {
+    const next = [e, ...recent.filter((x) => x !== e)].slice(0, 16)
+    setRecent(next)
+    try {
+      localStorage.setItem(EMOJI_RECENTS_KEY, JSON.stringify(next))
+    } catch {
+      /* storage full / disabled — recents are a nicety, not a need */
+    }
+    onPick(e)
+  }
+
+  return (
+    <div
+      className="pico-pop absolute bottom-[calc(100%+8px)] left-2 right-2 z-10 rounded-[18px] border border-black/[0.05] bg-white p-2 shadow-[0_12px_40px_rgba(0,0,0,0.14)]"
+      role="dialog"
+      aria-label="Emoji picker"
+    >
+      <div className="flex items-center justify-between px-1 pb-1.5">
+        <div className="flex gap-0.5 overflow-x-auto">
+          {recent.length > 0 && (
+            <button
+              onClick={() => setGroup(-1)}
+              aria-label="Recent emojis"
+              className={`h-7 rounded-full px-2.5 text-[11px] font-bold transition-colors ${group === -1 ? 'bg-[#0d0d0f] text-white' : 'text-[#7c7c82] hover:bg-[#f5f5f7]'}`}
+            >
+              Recent
+            </button>
+          )}
+          {EMOJI_GROUPS.map((g, i) => (
+            <button
+              key={g.name}
+              onClick={() => setGroup(i)}
+              className={`h-7 rounded-full px-2.5 text-[11px] font-bold transition-colors ${group === i ? 'bg-[#0d0d0f] text-white' : 'text-[#7c7c82] hover:bg-[#f5f5f7]'}`}
+            >
+              {g.name}
+            </button>
+          ))}
+        </div>
+        <button onClick={onClose} aria-label="Close emoji picker" className="shrink-0 rounded-full p-1 text-[#a9a9b0] hover:bg-[#f5f5f7]">
+          <X className="h-3.5 w-3.5" strokeWidth={2.6} />
+        </button>
+      </div>
+      <div className="ios-scroll grid max-h-40 grid-cols-8 gap-0.5 overflow-y-auto pt-1">
+        {(group === -1 ? recent : EMOJI_GROUPS[group]?.emojis ?? []).map((e, i) => (
+          <button
+            key={e + i}
+            onClick={() => pick(e)}
+            className="flex h-9 w-9 items-center justify-center rounded-xl text-[20px] leading-none transition-transform duration-100 hover:bg-[#f5f5f7] active:scale-90"
+            aria-label={`Emoji ${e}`}
+          >
+            {e}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export function ChatPanel({ onClose }: { onClose: () => void }) {
   const chat = useCallStore((s) => s.chat)
   const selfId = useCallStore((s) => s.self.id)
   const [draft, setDraft] = useState('')
+  const [replyTo, setReplyTo] = useState<ChatMessage | null>(null)
+  const [emojiOpen, setEmojiOpen] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -81,9 +193,32 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
   const send = () => {
     const text = draft.trim()
     if (!text) return
-    getEngine().sendChat(text)
+    getEngine().sendChat(text, replyTo ? { id: replyTo.id, name: replyTo.name, text: replyTo.text } : undefined)
     setDraft('')
+    setReplyTo(null)
+    setEmojiOpen(false)
   }
+
+  const jumpTo = (id: string) => {
+    const el = document.getElementById(`chat-msg-${id}`)
+    if (!el) return
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    el.classList.remove('pico-flash')
+    // restart the highlight animation if it just ran on this node
+    void el.offsetWidth
+    el.classList.add('pico-flash')
+  }
+
+  const renderQuote = (q: { id: string; name: string; text: string }, mine: boolean) => (
+    <button
+      onClick={() => jumpTo(q.id)}
+      className={`mb-1 block w-full rounded-[10px] border-l-2 px-2 py-1 text-left ${mine ? 'border-white/50 bg-white/10' : 'border-[#7c7c82] bg-black/[0.04]'}`}
+      aria-label={`Jump to message from ${q.name}`}
+    >
+      <span className={`block text-[10px] font-bold ${mine ? 'text-white/70' : 'text-[#7c7c82]'}`}>{q.name}</span>
+      <span className={`line-clamp-2 block text-[11px] leading-snug ${mine ? 'text-white/60' : 'text-[#7c7c82]'}`}>{q.text}</span>
+    </button>
+  )
 
   return (
     <Sheet title="Chat" onClose={onClose}>
@@ -97,8 +232,16 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
               {m.text}
             </p>
           ) : m.from === selfId ? (
-            <div key={m.id} className="flex justify-end">
+            <div key={m.id} id={`chat-msg-${m.id}`} className="group flex justify-end rounded-xl">
+              <button
+                onClick={() => setReplyTo(m)}
+                aria-label="Reply to your message"
+                className="pico-reply-btn mr-1.5 flex h-7 w-7 shrink-0 self-center items-center justify-center rounded-full bg-[#f5f5f7] text-[#7c7c82] hover:bg-[#ebebf0]"
+              >
+                <Reply className="h-3.5 w-3.5 -scale-x-100" strokeWidth={2.4} />
+              </button>
               <div className="max-w-[80%] rounded-[18px] rounded-br-[6px] bg-[#0d0d0f] px-3.5 py-2">
+                {m.replyTo && renderQuote(m.replyTo, true)}
                 <p className="whitespace-pre-wrap break-words text-[13px] leading-snug text-white">{m.text}</p>
                 <p className="mt-0.5 text-right text-[10px] font-medium text-white/55">
                   {new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -106,9 +249,10 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
               </div>
             </div>
           ) : (
-            <div key={m.id} className="flex justify-start">
+            <div key={m.id} id={`chat-msg-${m.id}`} className="group flex justify-start rounded-xl">
               <div className="max-w-[80%] rounded-[18px] rounded-bl-[6px] bg-[#f5f5f7] px-3.5 py-2">
                 <p className="text-[11px] font-bold text-[#7c7c82]">{m.name}</p>
+                {m.replyTo && renderQuote(m.replyTo, false)}
                 <p className="mt-0.5 whitespace-pre-wrap break-words text-[13px] leading-snug text-[#0d0d0f]">
                   {m.text}
                 </p>
@@ -116,12 +260,44 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
                   {new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                 </p>
               </div>
+              <button
+                onClick={() => setReplyTo(m)}
+                aria-label={`Reply to ${m.name}`}
+                className="pico-reply-btn ml-1.5 flex h-7 w-7 shrink-0 self-center items-center justify-center rounded-full bg-[#f5f5f7] text-[#7c7c82] hover:bg-[#ebebf0]"
+              >
+                <Reply className="h-3.5 w-3.5 -scale-x-100" strokeWidth={2.4} />
+              </button>
             </div>
           ),
         )}
       </div>
-      <footer className="safe-bottom border-t border-black/[0.05] p-3">
+      <footer className="safe-bottom relative border-t border-black/[0.05] p-3">
+        {emojiOpen && <EmojiPicker onPick={(e) => setDraft((d) => (d + e).slice(0, 500))} onClose={() => setEmojiOpen(false)} />}
+        {replyTo && (
+          <div className="mb-2 flex items-center gap-2 rounded-[14px] bg-[#f5f5f7] px-3 py-2">
+            <Reply className="h-3.5 w-3.5 shrink-0 -scale-x-100 text-[#7c7c82]" strokeWidth={2.4} />
+            <div className="min-w-0 flex-1 border-l-2 border-[#c7c7cd] pl-2">
+              <p className="text-[10px] font-bold text-[#7c7c82]">Replying to {replyTo.name}</p>
+              <p className="line-clamp-1 text-[11px] leading-snug text-[#a9a9b0]">{replyTo.text}</p>
+            </div>
+            <button
+              onClick={() => setReplyTo(null)}
+              aria-label="Cancel reply"
+              className="shrink-0 rounded-full p-1 text-[#a9a9b0] hover:bg-[#ebebf0]"
+            >
+              <X className="h-3.5 w-3.5" strokeWidth={2.6} />
+            </button>
+          </div>
+        )}
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => setEmojiOpen((v) => !v)}
+            aria-label={emojiOpen ? 'Close emoji picker' : 'Open emoji picker'}
+            aria-expanded={emojiOpen}
+            className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full transition-colors ${emojiOpen ? 'bg-[#0d0d0f] text-white' : 'text-[#7c7c82] hover:bg-[#f5f5f7]'}`}
+          >
+            <Smile className="h-[18px] w-[18px]" strokeWidth={2.2} />
+          </button>
           <input
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
@@ -371,6 +547,15 @@ export function MusicPanel({ onClose }: { onClose: () => void }) {
     }
   }
 
+  const startTabShare = async () => {
+    setStarting(true)
+    try {
+      await getEngine().startTabAudioShare()
+    } finally {
+      setStarting(false)
+    }
+  }
+
   const stop = () => {
     // One call tears down senders, store state and the element-backed handle
     getEngine().stopMusicShare()
@@ -386,7 +571,8 @@ export function MusicPanel({ onClose }: { onClose: () => void }) {
 
   const active = getEngine().activeMusic
   const duration = active?.duration || 0
-  const canControl = !!active && (!!active.play || originKind(active) !== 'tab')
+  // Tab shares have no play/pause/seek — playback belongs to the source tab.
+  const canControl = !!active && (!!active.play || getEngine().musicOriginKind !== 'tab')
 
   return (
     <Sheet title="Listen together" onClose={onClose}>
@@ -406,10 +592,17 @@ export function MusicPanel({ onClose }: { onClose: () => void }) {
               <FileAudio className="h-4 w-4" strokeWidth={2.2} />
               Choose a music file
             </button>
+            <button onClick={() => void startTabShare()} disabled={starting} className="ios-pill mt-2 h-12 w-full">
+              <Radio className="h-4 w-4" strokeWidth={2.2} />
+              {starting ? 'Waiting for picker…' : 'Share audio from a tab…'}
+            </button>
             <p className="mt-2.5 text-center text-[12px] leading-relaxed text-[#a9a9b0]">
-              MP3, M4A, WAV, OGG — stays on your device.
-              <br />
-              Uses about 96 kbps per listener. Silence costs nothing.
+              The browser picker lists every open tab, window and screen — pick the platform
+              or tab you want to share. Only its sound is sent (~96 kbps); the video capture
+              stops instantly, so this costs no CPU to speak of.
+            </p>
+            <p className="mt-1.5 text-center text-[11px] leading-relaxed text-[#c7c7cd]">
+              Local file instead? MP3, M4A, WAV, OGG — stays on your device.
             </p>
 
             {testMode && (
@@ -563,10 +756,6 @@ export function MusicPanel({ onClose }: { onClose: () => void }) {
       </div>
     </Sheet>
   )
-}
-
-function originKind(h: { title: string }): 'file' | 'test' | 'tab' {
-  return h.title === 'Shared tab audio' ? 'tab' : 'file'
 }
 
 /* ------------------------------------------------------------------ */

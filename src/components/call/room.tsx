@@ -17,7 +17,7 @@ import {
 } from 'lucide-react'
 import { getEngine } from '@/lib/call/engine'
 import { useCallStore } from '@/lib/call/store'
-import type { PeerState } from '@/lib/call/types'
+import type { ChatMessage, PeerState } from '@/lib/call/types'
 import { VideoTile } from './video-tile'
 import { NetworkBars } from './network-bars'
 import { ChatPanel, MusicPanel, ParticipantsPanel, QualityPanel, SecurityPanel } from './panels'
@@ -151,6 +151,56 @@ function VideoGrid() {
         </div>
       ))}
     </div>
+  )
+}
+
+/* ---------------- incoming-chat preview (chat closed) ---------------- */
+
+/**
+ * Floating preview of the latest incoming message, shown only while the chat
+ * panel is CLOSED. One subscription on the store (fires per mutation, does a
+ * length compare — nanoseconds), one element, pure-CSS entrance. Clicking it
+ * opens the chat; it dismisses itself after a few seconds.
+ */
+function ChatPreview({ onOpen }: { onOpen: () => void }) {
+  const [msg, setMsg] = useState<ChatMessage | null>(null)
+
+  useEffect(() => {
+    return useCallStore.subscribe((s, prev) => {
+      if (s.chat.length <= prev.chat.length) return
+      const m = s.chat[s.chat.length - 1]
+      if (m && !m.system && m.from !== s.self.id) setMsg(m)
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!msg) return
+    const t = window.setTimeout(() => setMsg(null), 5200)
+    return () => window.clearTimeout(t)
+  }, [msg])
+
+  if (!msg) return null
+  return (
+    <button
+      key={msg.id}
+      onClick={() => {
+        setMsg(null)
+        onOpen()
+      }}
+      aria-label="Open chat"
+      className="pico-toast-in fixed bottom-[176px] left-1/2 z-30 flex max-w-[min(92vw,380px)] -translate-x-1/2 items-center gap-2.5 rounded-[18px] border border-black/[0.05] bg-white/95 py-2.5 pl-3 pr-3.5 text-left shadow-[0_10px_36px_rgba(0,0,0,0.16)] backdrop-blur-xl sm:bottom-[132px]"
+    >
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#0d0d0f] text-[11px] font-bold text-white">
+        {msg.name.slice(0, 2).toUpperCase()}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[12px] font-bold text-[#0d0d0f]">{msg.name}</span>
+        <span className="line-clamp-1 block text-[12px] leading-snug text-[#7c7c82]">
+          {msg.replyTo ? `↩ ${msg.text}` : msg.text}
+        </span>
+      </span>
+      <MessageSquare className="h-4 w-4 shrink-0 text-[#30d158]" strokeWidth={2.4} />
+    </button>
   )
 }
 
@@ -329,6 +379,7 @@ export function Room({ roomCode, onLeave }: { roomCode: string; onLeave: () => v
 
       {/* Panels */}
       {panel === 'chat' && <ChatPanel onClose={() => setPanel(null)} />}
+      {panel !== 'chat' && <ChatPreview onOpen={() => setPanel('chat')} />}
       {panel === 'people' && <ParticipantsPanel onClose={() => setPanel(null)} roomCode={roomCode} />}
       {panel === 'quality' && <QualityPanel onClose={() => setPanel(null)} />}
       {panel === 'music' && <MusicPanel onClose={() => setPanel(null)} />}

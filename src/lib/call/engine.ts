@@ -13,6 +13,9 @@ import {
   MUSIC_BITRATE_BY_LEVEL,
   INITIAL_MUSIC,
   QUALITY_PROFILES,
+  SCREEN_SHARE,
+  SCREEN_MAX_WIDTH,
+  SCREEN_MAX_HEIGHT,
   type NetworkLevel,
   type QualityPreset,
   type QualityProfile,
@@ -429,9 +432,12 @@ export class CallEngine {
       if (sharing && store.spotlight !== peerId) store.setSpotlight(peerId)
       else if (!sharing && store.spotlight === peerId) store.setSpotlight(null)
     })
-    socket.on('chat:message', (msg: { id: string; from: string; name: string; text: string; ts: number }) => {
-      useCallStore.getState().addChat(msg)
-    })
+    socket.on(
+      'chat:message',
+      (msg: { id: string; from: string; name: string; text: string; ts: number; replyTo?: { id: string; name: string; text: string } }) => {
+        useCallStore.getState().addChat(msg)
+      },
+    )
 
     /* ---- security & host controls ---- */
     socket.on('host:changed', ({ hostId }: { hostId: string }) => {
@@ -881,10 +887,22 @@ export class CallEngine {
   private ensureMusicSender(peerId: string, pc: RTCPeerConnection) {
     if (!this.musicSource) return
     const senders = this.sendersMap.get(peerId)
-    if (!senders || senders.music) return
+    if (!senders) return
+    const track = this.musicSource.stream.getAudioTracks()[0]
+    if (!track) return
     try {
-      const track = this.musicSource.stream.getAudioTracks()[0]
-      if (!track) return
+      if (senders.music) {
+        // Sender already exists (previous session was replaced, not torn
+        // down): swap the outgoing source. addTransceiver here would be
+        // skipped — and the new session would silently never reach anyone.
+        const sender = senders.music
+        void sender.replaceTrack(track).catch(() => undefined)
+        const params = sender.getParameters()
+        if (!params.encodings || params.encodings.length === 0) params.encodings = [{}]
+        params.encodings[0].maxBitrate = MUSIC_BITRATE
+        void sender.setParameters(params).catch(() => undefined)
+        return
+      }
       const transceiver = pc.addTransceiver(track, {
         streams: [this.musicSource.stream],
         direction: 'sendrecv',
@@ -954,6 +972,52 @@ export class CallEngine {
   /** The active source, when it offers playback controls (file/test). */
   get activeMusic(): MusicSource | null {
     return this.musicSource
+  }
+
+  /**
+   * Share audio from ONE surface the user picks — any open tab, window or
+   * screen, chosen in the browser's own picker (that picker IS the source
+   * chooser: it lists every open tab across every platform/site). Only the
+   * audio track is kept: the video capture stops immediately, so this costs
+   * zero video encoding and ~96 kbps of Opus stereo for every listener.
+   */
+  async startTabAudioShare(): Promise<'started' | 'cancelled' | 'no-audio'> {
+    try {
+      const display = await navigator.mediaDevices.getDisplayMedia({
+        // video:true is only required so the browser offers its full picker;
+        // the track is stopped a line below — no frame is ever encoded.
+        video: true,
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        ...this.displayPickerHints(),
+      } as unknown as DisplayMediaStreamOptions)
+      const audioTrack = display.getAudioTracks()[0]
+      for (const t of display.getVideoTracks()) t.stop()
+      if (!audioTrack) {
+        toast('That source has no sound — pick a Chrome tab and tick “Share audio”', { duration: 4500 })
+        return 'no-audio'
+      }
+      // Chrome names tab tracks after the page — that is the friendliest label.
+      const label = audioTrack.label?.trim() ?? ''
+      // One listen-together session per room: this intent replaces any current one.
+      if (this.musicSource) this.stopMusicShare()
+      this.startMusicShare(
+        {
+          stream: new MediaStream([audioTrack]),
+          title: (label || 'Shared tab audio').slice(0, 80),
+          duration: 0,
+          getPosition: () => 0,
+          isPlaying: () => true,
+        },
+        'tab',
+      )
+      // User stopped the tab / clicked "Stop sharing" in Chrome's toolbar.
+      audioTrack.addEventListener('ended', () => {
+        if (this.musicOrigin === 'tab') this.stopMusicShare()
+      })
+      return 'started'
+    } catch {
+      return 'cancelled'
+    }
   }
 
   get musicSharing(): boolean {
@@ -1126,11 +1190,31 @@ export class CallEngine {
     const sharing = useCallStore.getState().self.sharing
     if (!sharing) {
       try {
+        const caps = this.screenCaps()
         const display = this.testMode
           ? await createTestScreenStream()
-          : await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
+          : await navigator.mediaDevices.getDisplayMedia({
+              // Capture-side caps are the single biggest CPU/bandwidth lever:
+              // Chrome's default grabs full resolution at up to 60 fps with no
+              // ceiling, which crushes low-end machines and weak links. 1080p
+              // at a preset-driven fps reads perfectly for screen content.
+              video: {
+                frameRate: { max: caps.maxFps },
+                width: { max: SCREEN_MAX_WIDTH },
+                height: { max: SCREEN_MAX_HEIGHT },
+              },
+              // Music-grade capture flags: no speech processing on tab audio.
+              audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+              ...(this.displayPickerHints()),
+            } as unknown as DisplayMediaStreamOptions)
         const track = display.getVideoTracks()[0]
         if (!track) return 'cancelled'
+        // Encoder hint: screens are detail-first content — sharp text beats fps.
+        try {
+          track.contentHint = 'detail'
+        } catch {
+          /* older browsers */
+        }
         this.screenTrack = track
         track.addEventListener('ended', () => {
           void this.stopShare()
@@ -1142,10 +1226,16 @@ export class CallEngine {
         useCallStore.getState().setSelf({ sharing: true })
         this.socket?.emit('state:update', { sharing: true })
         useCallStore.getState().setSpotlight('self')
+        // Screen senders get the screen budget (resolution-first encoding),
+        // not the talking-head camera caps.
+        await this.applyScreenVideoParams()
         // Tab / system audio, when the browser hands it over, rides the
         // music channel (dedicated Opus stereo sender) — not the mic.
         const audioTrack = display.getAudioTracks()[0]
-        if (audioTrack && !this.musicSource) {
+        if (audioTrack) {
+          // A screen share with sound is the newer intent — it replaces any
+          // running listen-together session instead of being silently dropped.
+          if (this.musicSource) this.stopMusicShare()
           this.startMusicShare(
             {
               stream: new MediaStream([audioTrack]),
@@ -1156,6 +1246,11 @@ export class CallEngine {
             },
             'tab',
           )
+        } else if (!this.testMode) {
+          // Most "no sound" reports are a picker choice, not a bug: screen
+          // audio only flows when a TAB is shared with "Share audio" ticked
+          // (and macOS Chrome cannot capture system audio at all).
+          toast('Shared without sound — for audio, pick a Chrome tab and tick “Share audio”', { duration: 4500 })
         }
         return 'started'
       } catch {
@@ -1164,6 +1259,49 @@ export class CallEngine {
     } else {
       await this.stopShare()
       return 'stopped'
+    }
+  }
+
+  /** Screen budget for the current (possibly adaptive) preset. */
+  private screenCaps(): { maxBitrate: number; maxFps: number } {
+    const preset = useCallStore.getState().preset
+    const key = preset === 'auto' ? this.adaptiveProfile : preset
+    return SCREEN_SHARE[key]
+  }
+
+  /** Picker options: list every surface, include system audio, hide this very
+   *  tab (sharing the call into itself would loop echo back to everyone). */
+  private displayPickerHints(): Record<string, unknown> {
+    return {
+      systemAudio: 'include',
+      selfBrowserSurface: 'exclude',
+      monitorTypeSurfaces: 'include',
+    }
+  }
+
+  /**
+   * Resolution-first encoding for the screen sender: keep text sharp, let fps
+   * drop under pressure. Runs on share start, preset change and link-cap
+   * changes — always capped by the per-link adaptive ceiling.
+   */
+  private async applyScreenVideoParams() {
+    const caps = this.screenCaps()
+    for (const [peerId, senders] of this.sendersMap) {
+      const sender = senders.video
+      if (!sender) continue
+      try {
+        const params = sender.getParameters()
+        if (!params.encodings || params.encodings.length === 0) params.encodings = [{}]
+        const cap = this.links.get(peerId)?.lastCap ?? null
+        params.encodings[0].maxBitrate = cap !== null ? Math.min(cap, caps.maxBitrate) : caps.maxBitrate
+        params.encodings[0].maxFramerate = caps.maxFps
+        // Maintain-resolution: on congestion, shed frames — never blur text.
+        ;(params as RTCRtpParameters & { degradationPreference?: RTCDegradationPreference }).degradationPreference =
+          'maintain-resolution'
+        await sender.setParameters(params)
+      } catch {
+        /* browser may not support a parameter — caps still apply where they do */
+      }
     }
   }
 
@@ -1241,8 +1379,14 @@ export class CallEngine {
 
   private async applyProfile() {
     const profile = this.resolveProfile()
+    // Screen share overrides camera quality entirely: while it is live the
+    // video senders carry the screen budget, not the talking-head profile.
+    if (this.screenTrack && this.screenTrack.readyState === 'live') {
+      await this.applyScreenVideoParams()
+      return
+    }
     // 1) Capture resolution / fps (no renegotiation needed)
-    if (this.cameraTrack && !this.screenTrack && this.cameraTrack.readyState === 'live') {
+    if (this.cameraTrack && this.cameraTrack.readyState === 'live') {
       try {
         await this.cameraTrack.applyConstraints(this.videoConstraints(profile))
       } catch {
@@ -1338,8 +1482,11 @@ export class CallEngine {
           try {
             const params = sender.getParameters()
             if (!params.encodings || params.encodings.length === 0) params.encodings = [{}]
-            const profile = this.resolveProfile()
-            params.encodings[0].maxBitrate = cap !== null ? Math.min(cap, profile.maxBitrate) : profile.maxBitrate
+            // The active medium decides the base budget: a live screen share
+            // needs the screen numbers, otherwise the camera profile applies.
+            const screenLive = !!this.screenTrack && this.screenTrack.readyState === 'live'
+            const base = screenLive ? this.screenCaps().maxBitrate : this.resolveProfile().maxBitrate
+            params.encodings[0].maxBitrate = cap !== null ? Math.min(cap, base) : base
             await sender.setParameters(params)
           } catch {
             /* ignore */
@@ -1392,10 +1539,19 @@ export class CallEngine {
 
   /* ---------------- chat / lifecycle ---------------- */
 
-  sendChat(text: string) {
+  sendChat(text: string, replyTo?: { id: string; name: string; text: string }) {
     const clean = text.trim().slice(0, 500)
     if (!clean) return
-    this.socket?.emit('chat:message', { text: clean })
+    // The quote is a plain-text snapshot: short, self-contained, and safe to
+    // keep in a bubble even after the original scrolls out of the 200-cap.
+    const rt = replyTo
+      ? {
+          id: String(replyTo.id || '').slice(0, 16),
+          name: String(replyTo.name || 'Guest').slice(0, 24),
+          text: String(replyTo.text || '').slice(0, 140),
+        }
+      : undefined
+    this.socket?.emit('chat:message', rt && rt.id && rt.text ? { text: clean, replyTo: rt } : { text: clean })
   }
 
   private rejoin() {

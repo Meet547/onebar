@@ -303,6 +303,50 @@
   animation: pico-breathe 2.2s ease-in-out infinite;
 }
 
+/* Incoming-chat preview toast — slides up + settles, transform/opacity only */
+@keyframes pico-toast-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 10px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+}
+.pico-toast-in {
+  animation: pico-toast-in 0.3s var(--ease-spring) both;
+}
+
+/* One-shot highlight when jumping to a replied-to message */
+@keyframes pico-flash {
+  0% {
+    background-color: rgba(48, 209, 88, 0.16);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+.pico-flash {
+  animation: pico-flash 1.1s ease-out both;
+}
+
+/* Per-message reply affordance: hover-to-reveal on pointer devices, always
+   faintly visible on touch (no hover there) — one class, zero JS. */
+.pico-reply-btn {
+  opacity: 0;
+  transition: opacity var(--dur-move) ease;
+}
+.group:hover .pico-reply-btn,
+.pico-reply-btn:focus-visible {
+  opacity: 1;
+}
+@media (hover: none) {
+  .pico-reply-btn {
+    opacity: 0.55;
+  }
+}
+
 /* Logo waveform bars */
 @keyframes pico-wave {
   0%,

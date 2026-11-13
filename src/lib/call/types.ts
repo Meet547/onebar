@@ -80,6 +80,8 @@ export interface ChatMessage {
   text: string
   ts: number
   system?: boolean
+  /** Quoted message when this was sent as a reply (plain text snapshot). */
+  replyTo?: { id: string; name: string; text: string }
 }
 
 export interface QualityProfile {
@@ -104,6 +106,27 @@ export const LINK_CAPS: Record<NetworkLevel, number | null> = {
   2: null, // use the profile default
   3: null, // use the profile default
 }
+
+/* ---------------- screen share ---------------- */
+
+/**
+ * Screen share gets its own budget — it is a different medium from a talking
+ * head: text must stay readable (resolution-first) and motion is cheap
+ * (screens rarely need more than ~15 fps). Compared to Chrome's default
+ * screen capture (full resolution, up to 60 fps, no bitrate ceiling) these
+ * caps cut encoder CPU by roughly an order of magnitude, which is what keeps
+ * the sharer's machine — and everyone's viewer — smooth.
+ */
+export const SCREEN_SHARE: Record<Exclude<QualityPreset, 'auto'>, { maxBitrate: number; maxFps: number }> = {
+  saver: { maxBitrate: 220_000, maxFps: 8 },
+  balanced: { maxBitrate: 600_000, maxFps: 15 },
+  sharp: { maxBitrate: 1_100_000, maxFps: 24 },
+}
+
+/** Capture ceiling — 1080p reads fine for any screen content and keeps
+ *  the encoder (and the viewer's decoder) cheap on low-end devices. */
+export const SCREEN_MAX_WIDTH = 1920
+export const SCREEN_MAX_HEIGHT = 1080
 
 export const ROOM_CODE_CHARS = 'abcdefghjkmnpqrstuvwxyz23456789'
 
