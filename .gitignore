@@ -54,3 +54,6 @@ server.log
 /skills/
 # user uploads (sandbox only)
 /upload/
+
+# tool result scratch
+/tool-results/
