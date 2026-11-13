@@ -3,6 +3,11 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   // src/instrumentation.ts keeps the signaling relay alive (see that file).
   output: "standalone",
+  // The signaling relay is embedded in the Next.js server process (see
+  // src/lib/relay-server.ts). Keeping socket.io external makes output file
+  // tracing copy it into .next/standalone/node_modules, so the production
+  // bundle is fully self-contained — no second process, no spawn.
+  serverExternalPackages: ["socket.io"],
   // Signaling and room-info ride the SAME origin/port as the app: these
   // rewrites proxy them to the relay processes server-side. This is what
   // makes the call relay reachable no matter which front door a browser

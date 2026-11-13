@@ -1,113 +1,110 @@
-import { spawn } from 'child_process'
-import { connect as tcpConnect } from 'net'
-import { openSync } from 'fs'
-
 /**
- * Embedded relay keeper (sandbox / single-box convenience).
+ * Embedded relay keeper (single-box / sandbox supervision).
  *
- * The signaling relay is an independent process on :3003/:3004. In the Docker
- * production stack it runs as its own container with `restart: unless-stopped`
- * (see docker-compose.yml), so this helper is inert there — disabled by
- * setting PICO_EMBEDDED_RELAY=0 on the app service.
+ * The signaling relay lives IN this process (see relay-server.ts) — a
+ * standalone production build therefore ships it with zero moving parts.
+ * This module adds two guarantees on top:
  *
- * In the sandbox preview the platform only supervises the Next.js dev server:
- * when the box is recycled the relay is simply gone, and every join would
- * dead-end in "Could not reach the call relay". Two layers make that
- * impossible:
- *
- *  1. startRelayKeeper() — wired through src/instrumentation.ts, it boots the
- *     relay the moment the Next.js server starts and re-checks it every few
- *     seconds for the whole life of the process. Self-healing with zero
- *     traffic.
+ *  1. startRelayKeeper() — wired through src/instrumentation.ts, it starts
+ *     (or adopts) the relay the moment the Next.js server boots and
+ *     re-checks it with a real engine.io handshake every few seconds for the
+ *     whole life of the process. Self-healing with zero traffic.
  *  2. ensureRelayAlive(wait) — awaited by /api/ice before it responds. The
  *     client fetches that endpoint on every join, so even if the keeper were
  *     somehow killed, the join itself revives the relay and waits until it
- *     actually listens before letting the browser connect.
+ *     actually speaks engine.io before letting the browser connect.
  *
- * Both layers share one single-flight revival, probe real TCP connectivity
- * (never trust "process spawned"), and never throw into the caller.
+ * Both layers share one single-flight revival, probe REAL engine.io
+ * handshakes (never trust "port is bound" — a zombie that holds the port but
+ * stopped serving would otherwise be trusted forever), and never throw into
+ * the caller.
+ *
+ * In the Docker production stack the relay runs as its own container
+ * (docker-compose.yml) and everything here is inert — disabled by setting
+ * PICO_EMBEDDED_RELAY=0 on the app service.
  */
 
-const RELAY_PORT = 3003
-const SPAWN_COOLDOWN_MS = 4_000
+import {
+  probeRelay,
+  startEmbeddedRelay,
+  resetEmbeddedRelay,
+  closeEmbeddedRelay,
+  type EmbeddedRelay,
+} from './relay-server'
+
+const RESTART_COOLDOWN_MS = 4_000
 const KEEPER_INTERVAL_MS = 10_000
 
-let lastSpawnAt = 0
+let lastRestartAt = 0
 let inFlight: Promise<boolean> | null = null
 
-export function probeRelay(timeoutMs = 800): Promise<boolean> {
-  return new Promise((resolve) => {
-    const sock = tcpConnect({ port: RELAY_PORT, host: '127.0.0.1' })
-    const done = (ok: boolean) => {
-      sock.destroy()
-      resolve(ok)
-    }
-    sock.setTimeout(timeoutMs, () => done(false))
-    sock.once('connect', () => done(true))
-    sock.once('error', () => done(false))
-  })
-}
-
-async function spawnRelay(): Promise<void> {
-  const cwd = process.cwd()
-  const relayDir = `${cwd}/mini-services/signaling`
-  console.log(`[relay-keeper] relay down on :${RELAY_PORT} — reviving…`)
-  // Pin the ports explicitly: the Next.js server sets process.env.PORT for
-  // its own port, and an inherited PORT would send the relay to the wrong
-  // one (bind failure → half-dead relay).
-  let logFd: number | undefined
-  try {
-    logFd = openSync(`${relayDir}/relay.log`, 'a')
-  } catch {
-    /* logging is best-effort */
-  }
-  await new Promise<void>((resolve) => {
-    try {
-      // Plain `bun index.ts` — no --hot watcher in the supervision path, one
-      // less subsystem that can fail. The keeper itself provides healing.
-      const child = spawn('bun', ['index.ts'], {
-        cwd: relayDir,
-        detached: true,
-        stdio: logFd !== undefined ? ['ignore', logFd, logFd] : 'ignore',
-        env: { ...process.env, PORT: '3003', INFO_PORT: '3004', SOCKET_PATH: '/' },
-      })
-      child.on('error', () => resolve())
-      child.unref()
-    } catch {
-      /* fall through — the probe loop below reports the truth */
-    }
-    resolve()
-  })
+type KeeperGlobal = typeof globalThis & {
+  __picoRelayKeeper?: boolean
 }
 
 /**
- * Make sure the relay on :3003 is accepting connections. Resolves `true`
- * only after a real TCP probe succeeds — spawning and waiting when needed.
- * Concurrent callers share a single revival (single-flight), so a burst of
- * joins during a cold boot costs exactly one spawn.
+ * Bring the relay to a verified-healthy state:
+ *  - healthy (owned or adopted) → true immediately (~1 probe)
+ *  - zombie owned handle        → close + fresh in-process bind
+ *  - dead adopted relay         → take over the port in-process
+ *  - nothing running            → start embedded
+ */
+async function ensureInternal(): Promise<boolean> {
+  // Fast path: a relay already answers a real engine.io handshake.
+  if (await probeRelay(800)) return true
+
+  const now = Date.now()
+  if (now - lastRestartAt < RESTART_COOLDOWN_MS) {
+    // Recently restarted — give it a moment instead of thrashing.
+    const deadline = Date.now() + 5_000
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 250))
+      if (await probeRelay(500)) return true
+    }
+    return false
+  }
+  lastRestartAt = Date.now()
+
+  // Whatever state we were in is dead: drop the singleton (closing sockets we
+  // own) so the embedded relay can bind cleanly — adopting first if a healthy
+  // foreign relay appeared in the meantime.
+  await closeEmbeddedRelay()
+  resetEmbeddedRelay()
+
+  const handle = (await startEmbeddedRelay()) as EmbeddedRelay | null
+  if (!handle) return false
+
+  // Verify with a real handshake before declaring victory.
+  const deadline = Date.now() + 6_000
+  while (Date.now() < deadline) {
+    if (await probeRelay(700)) return true
+    await new Promise((r) => setTimeout(r, 200))
+  }
+  console.log('[relay-keeper] embedded relay bound but not answering — giving up this round')
+  return false
+}
+
+/**
+ * Make sure the relay on the signaling port actually speaks engine.io.
+ * Resolves `true` only after a real handshake succeeds — reviving it when
+ * needed. Concurrent callers share a single revival (single-flight), so a
+ * burst of joins during a cold boot costs exactly one recovery.
  */
 export function ensureRelayAlive(waitMs = 9_000): Promise<boolean> {
   if (inFlight) return inFlight
   inFlight = (async () => {
     try {
-      if (await probeRelay()) return true
-
-      const now = Date.now()
-      if (now - lastSpawnAt >= SPAWN_COOLDOWN_MS) {
-        lastSpawnAt = Date.now()
-        await spawnRelay()
-      }
-
+      if (await probeRelay(800)) return true
       const deadline = Date.now() + waitMs
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 300))
-        if (await probeRelay(600)) {
-          console.log('[relay-keeper] relay is up')
-          return true
+      for (;;) {
+        const ok = await ensureInternal()
+        if (ok) return true
+        if (Date.now() >= deadline) {
+          console.log('[relay-keeper] revival failed — relay still unreachable')
+          return false
         }
+        await new Promise((r) => setTimeout(r, 300))
       }
-      console.log('[relay-keeper] revival failed — relay still unreachable')
-      return false
     } catch {
       return false
     } finally {
@@ -122,11 +119,11 @@ export function ensureRelayAlive(waitMs = 9_000): Promise<boolean> {
  * src/instrumentation.ts (Node runtime only).
  */
 export function startRelayKeeper(): void {
-  const g = globalThis as { __picoRelayKeeper?: boolean }
+  const g = globalThis as KeeperGlobal
   if (g.__picoRelayKeeper) return
   g.__picoRelayKeeper = true
 
-  console.log('[relay-keeper] starting — relay will be kept alive on :3003')
+  console.log('[relay-keeper] starting — embedded relay will be kept alive')
   void ensureRelayAlive(15_000)
   const timer = setInterval(() => {
     void (async () => {
