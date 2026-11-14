@@ -56,6 +56,10 @@ services:
       - PICO_VERSION=${PICO_VERSION:-}
       # Live TURN allocation stats (written by coturn's stats loop, below).
       - TURN_STATS_FILE=/etc/coturn/stats/turn-stats.json
+      # Token for the gated half of /api/health (allocation vs quota numbers).
+      # Without it the turn data is public — check-live.sh flags that on prod.
+      # Generate: openssl rand -hex 24
+      - HEALTH_TOKEN=${HEALTH_TOKEN:-}
       # Hostname of the turns: listener — the name whose certificate coturn
       # serves and whose SNI the Caddy layer4 multiplex matches. Defaults to
       # turn.<domain>; needs a DNS record for that name (Caddy obtains a
@@ -224,12 +228,25 @@ services:
     # 3478/udp+tcp (TURN), TURN_TLS_PORT/tcp (turns: TLS), 49152-65535/udp are bound by the conf
 
   caddy:
-    image: caddy:2
+    # NOT stock caddy:2 — the Caddyfile uses `encode zstd br gzip` and the
+    # optional layer4 TURN multiplex, neither of which stock Caddy ships.
+    # This build adds caddy-brotli + caddy-l4 (see deploy/Dockerfile.caddy).
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.caddy
+    image: pico-caddy
     restart: unless-stopped
     ports:
       - "80:80"
       - "443:443"
       - "443:443/udp"
+    # Caddy stays bridge-networked (it reaches app/signaling by service name),
+    # while coturn is host-networked. The optional SNI multiplex (DEPLOY.md)
+    # proxies the TURN SNI to host-gateway:8443 — without this mapping that
+    # name would not resolve inside the container and 127.0.0.1 would point
+    # at Caddy itself, not the host where coturn listens.
+    extra_hosts:
+      - "host-gateway:host-gateway"
     environment:
       - PICO_DOMAIN=${PICO_DOMAIN}
       # Site block below obtains/renews the LE cert for the TURN SNI host.

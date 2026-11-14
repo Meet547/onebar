@@ -14,7 +14,12 @@
 # (validated with Caddy 2.11.9 + layer4).
 
 {$PICO_DOMAIN} {
-	encode zstd gzip
+	# Brotli is the smallest wire format browsers accept (zstd where offered,
+	# gzip for everything else). The app handler below strips Accept-Encoding
+	# toward the origin (`header_up … identity`) because `next start` would
+	# otherwise gzip responses itself and Caddy's encode skips already-encoded
+	# bodies — i.e. without that line browsers would never actually get br.
+	encode zstd br gzip
 
 	# Signaling relay (websocket + polling fallback)
 	handle /socket.io/* {
@@ -34,7 +39,12 @@
 
 	# Everything else — the Pico app
 	handle {
-		reverse_proxy app:3000
+		reverse_proxy app:3000 {
+			# See `encode` above: keep the origin's responses uncompressed so
+			# Caddy itself picks br/zstd/gzip per client. Direct (non-Caddy)
+			# access to the app keeps Next's own gzip.
+			header_up Accept-Encoding identity
+		}
 	}
 
 	header {
@@ -45,7 +55,10 @@
 # TURN SNI hostname (TURN_TLS_HOST, default turn.<PICO_DOMAIN>): this block
 # exists ONLY so Caddy obtains and renews the Let's Encrypt certificate for
 # the TURN TLS host — coturn serves that cert from the shared caddy_data
-# volume, and the layer4 multiplex (see DEPLOY.md) matches its SNI. Requires
+# volume. The optional layer4 multiplex (stock caddy:2 has no layer4 module;
+# operators build it per DEPLOY.md) matches the same SNI and proxies to
+# host-gateway:8443 — coturn is host-networked, and a bridge-local
+# 127.0.0.1 would be Caddy itself. Requires
 # a DNS record for the name. If you set TURN_TLS_HOST equal to PICO_DOMAIN,
 # DELETE this block — Caddy rejects duplicate site addresses.
 {$TURN_TLS_HOST} {

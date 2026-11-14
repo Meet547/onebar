@@ -86,7 +86,12 @@ ufw allow 49152:65535/udp
 ### 3 · Launch
 
 ```bash
-docker compose up -d --build
+# PICO_VERSION stamps this deploy (socket version handshake, service-worker
+# cache pruning, /api/health, check-live.sh all key off it). The git short
+# SHA is unique per deploy by construction; the build also falls back to it
+# from the build context, but setting it explicitly works even when the
+# context has no .git.
+PICO_VERSION=$(git rev-parse --short HEAD) docker compose up -d --build
 docker compose logs -f caddy   # wait for "certificate obtained successfully"
 ```
 
@@ -96,9 +101,37 @@ Caddy obtains and renews TLS certificates automatically. That's it —
 ### 4 · Verify
 
 ```bash
-curl -s https://call.example.com/api/ice        # → {"iceServers":[…TURN…]}
-curl -s https://call.example.com/healthz        # → {"ok":true,…}
+bash scripts/check-live.sh call.example.com "$HEALTH_TOKEN"
 ```
+
+`check-live.sh` runs from any machine with only `curl`, `openssl` and
+`python3`, prints one PASS/FAIL line per check, and exits non-zero if any
+check failed. How to read the output:
+
+- **a. `turn:true` + `turn:` / `turns:` URLs** — /api/ice is advertising the
+  relay. The listed host:port lines never include credentials. No `turns:`
+  line → TURN TLS (the strict-firewall fallback) is not configured.
+- **b. SNI `turn.<domain>` on 443** — the TURN TLS path through the Caddy
+  multiplex: chain verifies (so **not self-signed** — browsers reject
+  self-signed TURN TLS), SAN matches, days-to-expiry (fails under 14 days —
+  renewal is broken before users notice), issuer reported. FAIL here with
+  PASS on (a) usually means the multiplex is not deployed and turns: rides
+  8443 directly.
+- **c. SNI `<domain>` on 443** — the website certificate still verifies and
+  the site is served; catches a multiplex that swallows the web SNI.
+- **d. health privacy** — without a token the public body must be
+  `{ok, version}` only; with your `HEALTH_TOKEN` the gated view shows
+  `allocations userQuota totalQuota`. Public allocation numbers = someone
+  skipped `HEALTH_TOKEN`.
+- **e. `x-pico-version` + content-encoding** — version must exist and not be
+  the `dev`/package fallback (it stamps the SW caches and the socket version
+  handshake); content-encoding must be `br` or `gzip` (identity means the
+  Caddyfile encode chain is not in front).
+- **f. cold first-load transfer size** — HTML + assets over the wire
+  (br/gzip sizes). Compare against ~240 KB brotli as the budget.
+- **g. shell + `sw.js` + ice cacheability** — the app shell and service
+  worker load over HTTPS, and `/api/ice` is `Cache-Control: no-store` (its
+  TURN credentials are short-lived; a cached copy hands out stale creds).
 
 Then the human test: open the site in a normal browser and in a phone on
 **cellular data** (not your wifi), join the same room, and confirm both
@@ -230,7 +263,12 @@ TURN backend):
                 route @turn {
                     # TLS passes through ENCRYPTED — coturn terminates it
                     # with the ACME cert; Caddy never sees the plaintext.
-                    proxy tcp/127.0.0.1:8443
+                    # Caddy runs in a BRIDGE container, so 127.0.0.1 would be
+                    # Caddy itself — the TURN target is the host's docker
+                    # bridge gateway, where host-networked coturn (compose:
+                    # network_mode: host) listens on 0.0.0.0:8443. The caddy
+                    # service must carry: extra_hosts: ["host-gateway:host-gateway"].
+                    proxy tcp/host-gateway:8443
                 }
             }
             # next wrapper: Caddy's own TLS termination for everything else
@@ -252,11 +290,20 @@ serves. **It requires a DNS record for `TURN_TLS_HOST`.** If you set
 rejects duplicate site addresses, and the multiplex cannot share the web
 SNI anyway (all traffic for that name would go to coturn).
 
-Notes: coturn keeps `TURN_TLS_PORT=8443` as its LISTEN port (only reachable
-via loopback now — firewall 8443 externally); QUIC/HTTP-3 on 443/udp is
-untouched (coturn's turns: is TCP-only, and the layer4 wrapper handles TCP).
-Behind the multiplex every TLS client appears to coturn as 127.0.0.1 — that
-is fine: `denied-peer-ip`/`no-multicast-peers`/`no-loopback-peers` restrict
+Notes: coturn keeps `TURN_TLS_PORT=8443` as its LISTEN port. coturn runs
+with `network_mode: host`, so 8443 is bound on every host interface —
+including the docker bridge gateway that `host-gateway` resolves to, and the
+public interface. **8443 is intentionally publicly reachable**: it is the
+`turns:` port `/api/ice` advertises; the 443 multiplex is the additional
+path for 80/443-only firewalls. If you instead want multiplex-only (close
+8443 to the internet), enforce it on the HOST firewall (`ufw deny 8443/tcp`
+— a host-networked container pays no attention to compose `ports:`), and
+note /api/ice would then advertise a port those same strict networks cannot
+reach directly; keep the multiplex as the turns: path for them. QUIC/HTTP-3
+on 443/udp is untouched (coturn's turns: is TCP-only, and the layer4 wrapper
+handles TCP). Behind the multiplex every TLS client appears to coturn as the
+docker bridge gateway IP (not 127.0.0.1 any more) — that is fine:
+`denied-peer-ip`/`no-multicast-peers`/`no-loopback-peers` restrict
 relay *targets*, not client source IPs, and the allocation quotas are keyed
 by username, not IP (see the comments in `coturn/turnserver.conf`).
 

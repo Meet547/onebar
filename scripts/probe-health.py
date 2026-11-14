@@ -18,8 +18,13 @@ BASE = f"http://127.0.0.1:{PORT}"
 REAL_STATS = "/tmp/coturn-bin/turn-stats.json"
 
 
-def curl(path, headers=False):
-    args = ["curl", "-s", "-D", "-", BASE + path] if headers else ["curl", "-s", BASE + path]
+def curl(path, headers=False, extra=None):
+    args = ["curl", "-s"]
+    if headers:
+        args += ["-D", "-"]
+    for h in extra or []:
+        args += ["-H", h]
+    args.append(BASE + path)
     return subprocess.check_output(args, text=True)
 
 
@@ -106,6 +111,22 @@ def main():
             fail_n += 1
             print(f"FAIL  {name} {extra}")
 
+    # 0. Default version (T2 contract): no PICO_VERSION env → build-time
+    #    header and runtime resolution must BOTH be the git short hash.
+    git_sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True,
+                             cwd="/home/z/my-project").stdout.strip()
+    start({"TURN_STATS_FILE": REAL_STATS})
+    body = json.loads(curl("/api/health"))
+    check("default version == git short hash", body.get("version") == git_sha,
+          f"api={body.get('version')} git={git_sha}")
+    hdr = curl("/", headers=True)
+    hdr_line = [l for l in hdr.lower().splitlines() if l.startswith("x-pico-version:")]
+    check("header version == same git hash (build==runtime)",
+          bool(hdr_line) and hdr_line[0].split(":", 1)[1].strip() == git_sha,
+          str(hdr_line))
+    stop()
+
     # 1. Real stats present — /api/health must mirror the exact /proc count.
     start({"TURN_STATS_FILE": REAL_STATS, "PICO_VERSION": "testv1"})
     body = json.loads(curl("/api/health"))
@@ -119,12 +140,8 @@ def main():
     check("not stale", body["turn"]["stale"] is False)
     check("quotas relayed", body["turn"]["userQuota"] == 30 and body["turn"]["totalQuota"] == 1000)
     hdr = curl("/", headers=True)
-    # NOTE: the x-pico-version VALUE is evaluated at BUILD time (next.config
-    # headers() → routes-manifest), so it equals the value the build saw —
-    # here the package fallback 0.2.1, since the sandbox build had no
-    # PICO_VERSION. Production keeps build==runtime in lockstep via compose
-    # passing the same ${PICO_VERSION:-} to the build arg and both envs; the
-    # /api/health "version reported" check above proves the runtime half.
+    # Build-time header: the sandbox build runs inside the git checkout, so
+    # the header carries the git short hash (mode 0 asserts the exact match).
     check("x-pico-version header present", "x-pico-version:" in hdr.lower(),
           hdr.lower()[:400])
     stop()
@@ -144,6 +161,26 @@ def main():
     start({"TURN_STATS_FILE": REAL_STATS, "PICO_VERSION": "testv3"})
     body = json.loads(curl("/api/health"))
     check("stale ts → stale:true", body["turn"]["stale"] is True, str(body["turn"]))
+    stop()
+
+    # 4. Token gate (T3): with HEALTH_TOKEN set, the public body carries NO
+    #    turn data; a wrong token is a 401; the right token shows everything.
+    start({"TURN_STATS_FILE": REAL_STATS, "PICO_VERSION": "testv4",
+           "HEALTH_TOKEN": "sekrit"})
+    body = json.loads(curl("/api/health"))
+    check("no token → ok+version still public", body.get("ok") is True
+          and body.get("version") == "testv4", str(body))
+    check("no token → no turn key at all", "turn" not in body, str(body.keys()))
+    code = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                           f"{BASE}/api/health?token=wrong"],
+                          capture_output=True, text=True).stdout.strip()
+    check("wrong token → 401", code == "401", code)
+    body = json.loads(curl("/api/health", extra=["x-health-token: sekrit"]))
+    check("right token (header) → allocations present",
+          isinstance(body.get("turn", {}).get("allocations"), int), str(body)[:200])
+    body = json.loads(curl("/api/health?token=sekrit"))
+    check("right token (query) → allocations present",
+          isinstance(body.get("turn", {}).get("allocations"), int), str(body)[:200])
     stop()
 
     print("—")

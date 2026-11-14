@@ -3,9 +3,17 @@
 # caddy (with mholt/caddy-l4) sniffs the TLS ClientHello on 443 — SNI
 # turn.example.com goes to coturn's TLS port, everything else falls through
 # to the ordinary HTTPS server. Requires: /tmp/caddytest/caddy with layer4.
+#
+# Upstream address: production uses tcp/host-gateway:8443 (Caddy is
+# bridge-networked, coturn host-networked — a bridge-local 127.0.0.1 would be
+# Caddy itself, see DEPLOY.md). This sandbox run is NOT a container, so the
+# live handshake checks point the proxy at the host-local stand-in via
+# TURN_UPSTREAM (default 127.0.0.1:8443); the exact production address is
+# separately parse-validated against the same caddy binary below.
 set -u
 cd /tmp/caddytest || exit 1
 CADDY=/tmp/caddytest/caddy
+TURN_UPSTREAM="${TURN_UPSTREAM:-127.0.0.1:8443}"
 
 # Self-signed cert standing in for coturn's ACME cert.
 openssl req -x509 -newkey rsa:2048 -nodes -days 30 \
@@ -26,7 +34,7 @@ cat > Caddyfile.test <<'EOF'
 				}
 				@turn tls sni turn.example.com
 				route @turn {
-					proxy tcp/127.0.0.1:8443
+					proxy tcp/$TURN_UPSTREAM
 				}
 			}
 			tls
@@ -48,8 +56,45 @@ turn.example.com {
 }
 EOF
 
-echo "== caddy validate =="
+# The heredoc is quoted, so substitute the upstream explicitly.
+sed -i "s|tcp/\$TURN_UPSTREAM|tcp/$TURN_UPSTREAM|" Caddyfile.test
+grep -q "proxy tcp/$TURN_UPSTREAM" Caddyfile.test || { echo "FAIL: upstream substitution"; exit 1; }
+
+echo "== caddy validate (live-check shape, upstream $TURN_UPSTREAM) =="
 $CADDY validate --config Caddyfile.test 2>&1 | tail -2 || exit 1
+
+echo "== caddy validate (PRODUCTION snippet: tcp/host-gateway:8443) =="
+# The exact address the DEPLOY.md multiplex ships with — parse-validated
+# here because the live checks above run on the host, not in a container.
+cat > Caddyfile.prod-shape <<'EOF'
+{
+	admin off
+	http_port 0
+	https_port 4431
+	auto_https disable_redirects
+	servers :4431 {
+		listener_wrappers {
+			layer4 {
+				@acme tls alpn acme-tls/1
+				route @acme {
+					tls
+				}
+				@turn tls sni turn.example.com
+				route @turn {
+					proxy tcp/host-gateway:8443
+				}
+			}
+			tls
+		}
+	}
+}
+
+turn.example.com {
+	tls internal
+	respond 421
+}
+EOF
+$CADDY validate --config Caddyfile.prod-shape 2>&1 | tail -2 || exit 1
 
 # Stand-in coturn TLS: openssl s_server on 8443.
 openssl s_server -accept 8443 -cert turn.crt -key turn.key -www -quiet >/dev/null 2>&1 &

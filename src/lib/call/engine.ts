@@ -337,6 +337,14 @@ export class CallEngine {
    *  → 2 +fps cap → 3 audio-only send. */
   private cpu: CpuLadderState = { step: 0, badTicks: 0, cleanTicks: 0 }
   private cpuVideoPaused = false
+  /** Last 20 adaptation events for the ?debug=1 field report (newest last). */
+  private adaptLog: string[] = []
+
+  /** Append to the adaptation event ring buffer, capped at 20 entries. */
+  private logAdapt(msg: string) {
+    this.adaptLog.push(`[${new Date().toTimeString().slice(0, 8)}] ${msg}`)
+    if (this.adaptLog.length > 20) this.adaptLog.splice(0, this.adaptLog.length - 20)
+  }
   /** Receive-side interest: each remote peer's wish-set for MY video. */
   private wishBy = new Map<string, Set<string>>()
   private lastWish = ''
@@ -1947,6 +1955,8 @@ export class CallEngine {
     const debugPeers: DebugPeerInfo[] = []
     let worstReason = 'none'
     let worstEncodeMs = 0
+    let worstLossPct: number | null = null
+    let worstRttMs: number | null = null
     /** Weakest smoothed outgoing BWE across connected links — the shared
      *  uplink bottleneck approximation (task 4). */
     let weakestBwe: number | null = null
@@ -2019,6 +2029,7 @@ export class CallEngine {
             localCandidateId?: string
             remoteCandidateId?: string
             candidateType?: string
+            protocol?: string
             qualityLimitationReason?: string
             totalEncodeTime?: number
             framesEncoded?: number
@@ -2035,7 +2046,12 @@ export class CallEngine {
             }
           }
           if ((r.type === 'local-candidate' || r.type === 'remote-candidate') && typeof r.candidateType === 'string') {
-            candTypes.set(r.id, r.candidateType)
+            // "type/protocol" (relay/udp) — the field report shows the wire
+            // path without ever touching the candidate's IP/port.
+            candTypes.set(
+              r.id,
+              typeof r.protocol === 'string' ? `${r.candidateType}/${r.protocol}` : r.candidateType,
+            )
           }
           if (r.type === 'remote-inbound-rtp' && typeof r.fractionLost === 'number') {
             loss = loss === null ? r.fractionLost : Math.max(loss, r.fractionLost)
@@ -2110,7 +2126,10 @@ export class CallEngine {
         mode: ignoreBwe ? 'ignore-bwe' : 'normal',
         fallback: warmup ? 3 : (prevLevel ?? null),
       })
-      if (prevLevel !== level) useCallStore.getState().patchPeer(peerId, { level })
+      if (prevLevel !== level) {
+        useCallStore.getState().patchPeer(peerId, { level })
+        this.logAdapt(`peer ${peerId.slice(0, 5)} L${prevLevel ?? '?'}→L${level}`)
+      }
       connectedLevel = connectedLevel === null ? level : (Math.min(connectedLevel, level) as NetworkLevel)
       connectedCount++
       if (level <= 1) weakCount++
@@ -2129,6 +2148,7 @@ export class CallEngine {
           const dueNow = link.silentTicks === 5 || (link.silentTicks > 5 && (link.silentTicks - 5) % 3 === 0)
           if (dueNow && link.restarts < 4) {
             link.restarts++
+            this.logAdapt('ice restart (one-way media stall)')
             try {
               pc.restartIce()
             } catch {
@@ -2165,7 +2185,17 @@ export class CallEngine {
         kbpsDown: Math.round((inboundDelta * 8) / (STATS_INTERVAL_MS * 1000)),
         level,
         candidateType: link?.candType ?? '?',
+        lossPct: loss !== null ? Math.round(loss * 1000) / 10 : null,
+        rttMs: rtt !== null ? Math.round(rtt * 1000) : null,
       })
+      if (loss !== null) {
+        const pct = Math.round(loss * 1000) / 10
+        worstLossPct = worstLossPct === null ? pct : Math.max(worstLossPct, pct)
+      }
+      if (rtt !== null) {
+        const ms = Math.round(rtt * 1000)
+        worstRttMs = worstRttMs === null ? ms : Math.max(worstRttMs, ms)
+      }
       const linkBwe = bweNow
       // An app-limited link's estimate is our own cap echoed back — feeding
       // it into the shared budget would shrink the cap ~20% every poll until
@@ -2280,7 +2310,10 @@ export class CallEngine {
       (useCallStore.getState().self.camOn || (!!this.screenTrack && this.screenTrack.readyState === 'live'))
     const tick = cpuLadderTick(this.cpu, worstReason === 'cpu', camSending)
     this.cpu = tick
-    if (tick.changed) void this.applyCpuStep()
+    if (tick.changed) {
+      this.logAdapt(`cpu ladder step ${this.cpu.step}`)
+      void this.applyCpuStep()
+    }
 
     const prevOverall = useCallStore.getState().overallLevel
     if (prevOverall !== overall) {
@@ -2310,12 +2343,14 @@ export class CallEngine {
         this.adaptiveProfile = order[idx - 1]
         this.badCount = 0
         this.goodCount = 0
+        this.logAdapt(`profile down → ${this.adaptiveProfile}`)
         useCallStore.getState().setEffectiveLabel(this.effectiveLabel())
         void this.applyProfile()
       } else if (this.goodCount >= 8 && idx < order.length - 1) {
         this.adaptiveProfile = order[idx + 1]
         this.badCount = 0
         this.goodCount = 0
+        this.logAdapt(`profile up → ${this.adaptiveProfile}`)
         useCallStore.getState().setEffectiveLabel(this.effectiveLabel())
         void this.applyProfile()
       }
@@ -2330,7 +2365,11 @@ export class CallEngine {
         cpuReason: worstReason,
         cpuStep: this.cpu.step,
         encodeMsPerFrame: Math.round(worstEncodeMs * 10) / 10,
+        qlReason: worstReason,
+        lossPct: worstLossPct,
+        rttMs: worstRttMs,
         peers: debugPeers,
+        events: [...this.adaptLog],
       })
     }
   }

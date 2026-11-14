@@ -1,9 +1,12 @@
 import type { NextConfig } from "next";
 import fs from "node:fs";
 
-// Deployment version: PICO_VERSION env when set (compose passes it to the
-// build and to every service at runtime), else package.json's version.
-// One source, three consumers that MUST agree:
+// Deployment version: PICO_VERSION env when set, else the git short hash of
+// the build context, else package.json's version — with a loud warning on
+// that last fallback (keep the order in sync with src/lib/server-version.ts,
+// which re-resolves the SAME value at runtime; Docker builds pin it via a
+// .pico-version stamp written by Dockerfile.standalone, so an image without
+// git still matches its build). One source, three consumers that MUST agree:
 //  - client bundle (NEXT_PUBLIC_PICO_VERSION below → socket version check),
 //  - every HTTP response (x-pico-version header → service worker cache
 //    versioning),
@@ -11,7 +14,26 @@ import fs from "node:fs";
 const pkgVersion = (JSON.parse(
   fs.readFileSync(new URL("./package.json", import.meta.url), "utf8"),
 ) as { version?: string }).version;
-const PICO_VERSION = process.env.PICO_VERSION || pkgVersion || "dev";
+
+let PICO_VERSION = process.env.PICO_VERSION || "";
+if (!PICO_VERSION) {
+  try {
+    PICO_VERSION = require("node:child_process")
+      .execSync("git rev-parse --short HEAD", { stdio: ["ignore", "pipe", "ignore"] })
+      .toString()
+      .trim();
+  } catch {
+    /* not a git checkout (or no git binary) */
+  }
+}
+if (!PICO_VERSION) {
+  console.error(
+    `[pico] PICO_VERSION is unset and no git checkout found — falling back to ` +
+      `package.json "${pkgVersion}", which is NOT unique per deploy. Set PICO_VERSION ` +
+      `(e.g. the git short SHA) or build from a git checkout — see DEPLOY.md.`,
+  );
+  PICO_VERSION = pkgVersion || "dev";
+}
 
 const nextConfig: NextConfig = {
   env: { NEXT_PUBLIC_PICO_VERSION: PICO_VERSION },

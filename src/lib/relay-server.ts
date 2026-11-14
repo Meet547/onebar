@@ -1,11 +1,12 @@
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from 'http'
 import { Server as IoServer, type Socket } from 'socket.io'
 import { versionMismatch } from './version'
+import { resolvePicoVersion } from './server-version'
 
 /** Server build identity, answered to the client's version:hello handshake
- *  (see the engine's connect handler). Same value as the app's NEXT_PUBLIC
- *  inlined version when both containers share PICO_VERSION. */
-const SERVER_VERSION = process.env.PICO_VERSION ?? null
+ *  (see the engine's connect handler). Resolved like the build-time header —
+ *  env, .pico-version build stamp, git hash, package.json fallback. */
+const SERVER_VERSION = resolvePicoVersion()
 
 /**
  * Pico — embedded in-process signaling relay.

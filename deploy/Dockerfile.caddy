@@ -1,0 +1,12 @@
+# Caddy with the modules Pico needs — this is what docker-compose.yml builds:
+#   - brotli encoding: `encode zstd br gzip` (stock caddy:2 has NO brotli
+#     encoder and would REFUSE to start on that line)
+#   - layer4: the optional TURN-over-TLS SNI multiplex on 443 (DEPLOY.md) —
+#     shipping it here makes that setup work without a hand-built caddy
+FROM caddy:2-builder AS builder
+RUN xcaddy build \
+    --with github.com/mholt/caddy-brotli \
+    --with github.com/mholt/caddy-l4
+
+FROM caddy:2
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy

@@ -32,7 +32,10 @@ export interface DebugPeerInfo {
   kbpsUp: number
   kbpsDown: number
   level: NetworkLevel
+  /** "localType/protocol→remoteType/protocol", no IPs or ports. */
   candidateType: string
+  lossPct: number | null
+  rttMs: number | null
 }
 
 export interface DebugInfo {
@@ -44,7 +47,14 @@ export interface DebugInfo {
   cpuReason: string
   cpuStep: number
   encodeMsPerFrame: number
+  /** Raw qualityLimitationReason ('cpu', 'bandwidth', …). */
+  qlReason: string
+  /** Worst-case across peers. */
+  lossPct: number | null
+  rttMs: number | null
   peers: DebugPeerInfo[]
+  /** Last 20 adaptation events, "[hh:mm:ss] text". */
+  events: string[]
 }
 
 interface CallStore {
