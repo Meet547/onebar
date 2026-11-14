@@ -15,11 +15,14 @@
 # everything else lives on the compose bridge network.
 #
 # TCP 443 is Caddy's. coturn's TLS listener therefore defaults to 8443 on a
-# single-IP host — still enough for most restrictive networks. True
-# turns:…:443 requires a dedicated IP for coturn (recommended) or SNI
-# multiplexing via Caddy's layer4 module — both documented in DEPLOY.md.
-# The turns: certificate must be REAL (browsers validate TURN TLS certs);
-# the coturn entrypoint reuses the Let's Encrypt cert from Caddy's storage.
+# single-IP host — a convenience default, NOT a guarantee: firewalls that
+# allow only outbound 80+443 block 8443 just like 3478. True turns:…:443
+# (dedicated IP or SNI multiplex via Caddy layer4) is REQUIRED if corporate/
+# hotel Wi-Fi matters — both documented in DEPLOY.md (the SNI shape there is
+# validated against a real Caddy+layer4 build). The turns: certificate must
+# be REAL (browsers validate TURN TLS certs); the coturn entrypoint reuses
+# the Let's Encrypt cert from Caddy's storage and reloads on SIGUSR2 when
+# Caddy renews it.
 
 services:
   app:
@@ -81,10 +84,13 @@ services:
       - caddy_data:/etc/coturn/acme:ro
       # Fallback store for the (discouraged) self-signed mint.
       - coturn_certs:/etc/coturn/certs
-    # Substitute the template placeholders, locate the real ACME cert, run.
-    # Fresh deploys: Caddy has no cert yet on the very first boot, so coturn
-    # starts with a loud warning + self-signed fallback — restart it after
-    # Caddy's first issuance: `docker compose restart coturn`.
+    # Substitute the template placeholders, locate the real ACME cert, run,
+    # and watch the certificate files: coturn only re-reads certificates on
+    # SIGUSR2 (SIGHUP just resets the log file), so without this watcher a
+    # Caddy renewal at ~day 60 would leave TURN serving the stale cert until
+    # it expires. Fresh deploys: Caddy has no cert yet on the very first
+    # boot — coturn starts with a loud warning + self-signed fallback;
+    # restart it after Caddy's first issuance: `docker compose restart coturn`.
     entrypoint:
       - /bin/sh
       - -c
@@ -113,7 +119,39 @@ services:
             -e "s|{{{TURN_CERT}}}|$CRT|g" \
             -e "s|{{{TURN_KEY}}}|$KEY|g" \
             /etc/coturn/turnserver.conf.template > /tmp/turnserver.conf
-        exec turnserver -c /tmp/turnserver.conf
+        # Health/writer state for the healthcheck below and the watcher.
+        echo "$CRT" > /tmp/turn-cert-path
+
+        turnserver -c /tmp/turnserver.conf &
+        TURN_PID=$!
+        echo "$TURN_PID" > /tmp/turn-pid
+        trap 'kill -TERM "$TURN_PID" 2>/dev/null' TERM INT
+        # Renewal watcher: reload on certificate change. coturn reloads
+        # certs on SIGUSR2 only (coturn issue #725 — SIGHUP resets the log).
+        LAST=$(sha256sum "$CRT" "$KEY" 2>/dev/null | sha256sum | cut -d" " -f1)
+        while kill -0 "$TURN_PID" 2>/dev/null; do
+          sleep "${TURN_CERT_CHECK_INTERVAL:-300}"
+          [ -r "$CRT" ] && [ -r "$KEY" ] || continue
+          if ! openssl x509 -checkend 1209600 -noout -in "$CRT" 2>/dev/null; then
+            echo "[coturn] WARNING: turns: certificate expires within 14 days and has not been renewed — check Caddy/certbot; container will report unhealthy."
+          fi
+          NOW=$(sha256sum "$CRT" "$KEY" 2>/dev/null | sha256sum | cut -d" " -f1)
+          if [ -n "$NOW" ] && [ "$NOW" != "$LAST" ]; then
+            echo "[coturn] turns: certificate changed — SIGUSR2 reload"
+            LAST="$NOW"
+            kill -USR2 "$TURN_PID" 2>/dev/null || true
+          fi
+        done
+        wait "$TURN_PID"
+    # Fails (→ unhealthy) when the relay process is gone OR the turns:
+    # certificate is within 14 days of expiry — i.e. the renewal pipeline
+    # is broken and the strict-firewall fallback is about to die.
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 $(cat /tmp/turn-pid) 2>/dev/null && openssl x509 -checkend 1209600 -noout -in $(cat /tmp/turn-cert-path)"]
+      interval: 1h
+      timeout: 10s
+      retries: 2
+      start_period: 30s
     # 3478/udp+tcp (TURN), TURN_TLS_PORT/tcp (turns: TLS), 49160-49200/udp are bound by the conf
 
   caddy:

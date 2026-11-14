@@ -184,39 +184,93 @@ issued, or wire `TURN_CERT_FILE` / `TURN_KEY_FILE` to a certbot-provided pair.
 
 Port placement (coturn uses host networking, so this is a real socket):
 
-| Setup | `TURN_TLS_PORT` | Notes |
+| Setup | `TURN_TLS_PORT` | Reachability |
 | --- | --- | --- |
-| **Default (single IP)** | `8443` | no conflict with Caddy; passes most restrictive networks |
-| coturn on a dedicated second IP (best) | `443` | best reachability; open `443/tcp` on that IP's firewall |
-| SNI multiplex on one IP | `443` | needs a Caddy build with `caddyserver/layer4`; see below |
+| coturn on a dedicated second IP | `443` | **Best.** Survives 80/443-only firewalls. Open `443/tcp` on that IP. |
+| SNI multiplex on one IP | `443` | **Equivalent reachability**, one IP; needs a Caddy build with the layer4 module — verified setup below. |
+| Single IP, no multiplex | `8443` | Works for whitelists that include 8443, but corporate/hotel firewalls that allow ONLY outbound 80+443 will block it exactly like 3478. Choose this only if those networks don't matter to you. |
 
-SNI multiplexing (single IP, true 443 for both web and TURN): build Caddy
-with the layer4 module (`xcaddy build --with github.com/caddyserver/layer4`)
-and replace the plain HTTPS server with a TLS-passthrough sniffer that routes
-by SNI — TURN's ClientHello (domain SNI) goes to coturn on its own port,
-everything else to Caddy's HTTPS:
+**If you care about corporate/hotel/airport Wi-Fi, treat a true-443 setup
+(dedicated IP or SNI multiplex) as required, not optional.** 8443 is a
+convenience default, not a guarantee.
+
+### SNI multiplexing — verified configuration
+
+Single IP, true 443 for both the website and TURN: a Caddy build with the
+layer4 module sniffs the TLS ClientHello on 443 — the ClientHello carrying
+the TURN domain's SNI is proxied (unterminated) to coturn's TLS port, every
+other ClientHello falls through to the ordinary HTTPS server.
+
+This exact shape was validated end-to-end with Caddy 2.11.9 +
+`github.com/mholt/caddy-l4` (validate + live `openssl s_client` checks:
+TURN SNI reaches the TURN backend, web SNI reaches Caddy's HTTPS, unknown
+SNI is refused by Caddy — it never leaks into the TURN backend):
 
 ```caddyfile
-:443 {
-    layer4 {
-        :443 {
-            tls sni turn.example.com
-            route {
-                route turn    # -> tcp 127.0.0.1:8443 (coturn, keep TLS inside)
+# Build: xcaddy build --with github.com/mholt/caddy-l4
+#        (the registered package path; "caddyserver/layer4" is NOT valid
+#         for `caddy add-package`)
+{
+    servers :443 {
+        listener_wrappers {
+            layer4 {
+                @turn tls sni turn.example.com
+                route @turn {
+                    # TLS passes through ENCRYPTED — coturn terminates it
+                    # with the ACME cert; Caddy never sees the plaintext.
+                    proxy tcp/127.0.0.1:8443
+                }
             }
-            route {
-                route web     # -> the ordinary https server below
-            }
+            # next wrapper: Caddy's own TLS termination for everything else
+            tls
         }
     }
 }
+
+turn.example.com, call.example.com {
+    # ... the ordinary site blocks (reverse_proxy app/signaling) ...
+}
 ```
 
-This is an optional pattern — the default 8443 setup needs none of it.
+Notes: coturn keeps `TURN_TLS_PORT=8443` as its LISTEN port (only reachable
+via loopback now — firewall 8443 externally); QUIC/HTTP-3 on 443/udp is
+untouched (coturn's turns: is TCP-only, and the layer4 wrapper handles TCP).
+
+### Certificate renewal — do not skip this
+
+coturn reads the certificate at startup ONLY (a reload happens on SIGUSR2;
+SIGHUP merely resets the log file). Caddy renews the Let's Encrypt cert
+around day 60 — without extra plumbing coturn would keep serving the stale
+cert until it expires, and TURN would die silently. The compose stack ships
+the fix:
+
+- the coturn entrypoint runs a **cert watcher** (5 min cadence,
+  `TURN_CERT_CHECK_INTERVAL` to tune): when the cert/key files change it
+  sends **SIGUSR2** to reload, logging `[coturn] turns: certificate changed`;
+- a **healthcheck** marks the container unhealthy when the relay process is
+  gone **or the certificate is within 14 days of expiry** — wire
+  `docker ps` health state (or `docker inspect --format '{{.State.Health.Status}}' coturn`)
+  into your monitor.
+
 Set `TURN_TLS_443=0` to stop advertising the `turns:` entry entirely.
 The app logs a boot warning (and `/api/ice` warns + returns
 `"warning":"stun-only"`) whenever TURN is not configured — treat it as a
 health-check signal in your monitor.
+
+### Verifying TURN on a live deployment
+
+From any machine, against the real domain:
+
+```sh
+curl -s https://<your-domain>/api/ice | python3 -m json.tool
+```
+
+You should see `turn:…:3478` entries AND a `turns:…:8443?transport=tcp`
+entry (port = `TURN_TLS_PORT`) with short-lived `username`/`credential`.
+If the response says `"turn": false, "warning": "stun-only"`, TURN is NOT
+live — strict-NAT pairs (carriers, hotel Wi-Fi) will fail to connect while
+everything else looks fine. Also check `docker ps` for coturn's health
+status and `docker compose logs coturn` for the cert-watcher lines.
 
 ## Operations
 

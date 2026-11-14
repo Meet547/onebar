@@ -7,9 +7,11 @@
 # WebSocket upgrade on /socket.io is handled automatically by Caddy.
 #
 # NOTE on TCP 443: Caddy owns 443 here. coturn's turns: TLS listener defaults
-# to 8443 on a single-IP host (still passes most restrictive networks). For
-# true turns:…:443, either give coturn a dedicated public IP, or multiplex by
-# SNI with Caddy's layer4 module — see the "TURN over TLS" section in DEPLOY.md.
+# to 8443 on a single-IP host — but 80/443-only firewalls block 8443 exactly
+# like 3478. For true turns:…:443, either give coturn a dedicated public IP,
+# or multiplex by SNI with a Caddy build carrying the layer4 module
+# (github.com/mholt/caddy-l4) — the working config shape is in DEPLOY.md
+# (validated with Caddy 2.11.9 + layer4).
 
 {$PICO_DOMAIN} {
 	encode zstd gzip

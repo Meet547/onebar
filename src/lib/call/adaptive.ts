@@ -28,9 +28,21 @@ export const BWE_LEVEL2_BPS = 600_000 // below → level 2 (profile default)
 export const BWE_WARMUP_POLLS = 4
 /** The sender is app-limited when it sends ≥ this fraction of its own cap. */
 export const APP_LIMITED_FACTOR = 0.9
-/** Probe-up cadence: every N polls (≈30 s) the budget is lifted for one poll
- *  so the transport can probe upward and the estimate can recover. */
+/** Probe-up cadence: every N polls (≈30 s) the budget is lifted so the
+ *  transport can probe upward and the estimate can recover. */
 export const PROBE_EVERY_POLLS = 10
+/** Probe DURATION: 3 polls ≈ 9 s. Chrome's bandwidth estimator ramps up
+ *  gradually — a single 3 s window often ends before the estimate has moved
+ *  at all, so a useful probe spans several polls. */
+export const PROBE_POLLS = 3
+/** Skip a probe-up when EITHER of the last two loss samples exceeded this —
+ *  probing into fresh loss briefly congests a link that is genuinely weak. */
+export const PROBE_LOSS_GUARD = 0.02
+/** Budget-hold expiry: holding the last budget is valid only while the
+ *  estimate stream is alive (fresh echo samples). Once no BWE sample has
+ *  arrived for N polls, the held budget is stale → fall back to a
+ *  conservative weak-link cap (LINK_CAPS[1]). */
+export const HOLD_MAX_POLLS = 5
 
 /* ---- mesh upload budget ---- */
 /** Budget = share × the weakest smoothed BWE (headroom for ICE/RTCP). */
@@ -133,6 +145,13 @@ export interface BudgetInput {
    *  later). Only a probe poll lifts the hold. */
   lastBudget?: number
   lastScale?: number
+  /** True once this link has EVER reported a BWE sample — distinguishes
+   *  browsers without transport-cc (no budget regime at all) from browsers
+   *  whose estimate stream went silent. */
+  bweEver?: boolean
+  /** Polls since the link's last BWE sample (0 = fresh). Holds are valid
+   *  only while this is ≤ HOLD_MAX_POLLS. */
+  bweAge?: number
 }
 
 export interface BudgetDecision {
@@ -147,21 +166,30 @@ export interface BudgetDecision {
 }
 
 export function splitBudget(i: BudgetInput): BudgetDecision {
-  // Probe-up: lift EVERY cap for one poll (budget AND the level's LINK_CAP —
-  // the level may itself be pinned by the app-limited guard) so the transport
-  // can probe to the profile bitrate and the estimate can recover. If the
-  // link is genuinely bad, loss/RTT re-cap it on the very next poll.
+  // Probe-up: lift EVERY cap for the probe window (budget AND the level's
+  // LINK_CAP — the level may itself be pinned by the app-limited guard) so
+  // the transport can probe to the profile bitrate and the estimate can
+  // recover. If the link is genuinely bad, loss/RTT re-cap it immediately.
   if (i.probing) return { target: i.baseBitrate, scale: 1, budgeted: false, share: 0 }
   if (i.screenLive) return { target: LINK_CAPS[i.level] !== null ? Math.min(LINK_CAPS[i.level] as number, i.baseBitrate) : i.baseBitrate, scale: 1, budgeted: false, share: 0 }
+  const cap = LINK_CAPS[i.level]
+  const base = cap !== null ? Math.min(cap, i.baseBitrate) : i.baseBitrate
   // No honest estimate this poll (every connected link is app-limited): hold
   // the last decision. Lifting to base here would ping-pong against the
   // honest budget computed one poll later — the oscillation the offline
-  // tests caught. Only the periodic probe breaks the hold.
-  if (i.weakestBwe === null && (i.lastBudget ?? 0) > 0) {
+  // tests caught. Only the periodic probe breaks the hold. The hold itself
+  // expires (HOLD_MAX_POLLS): a stale budget with no fresh estimate behind
+  // it falls back to a conservative weak-link cap. Browsers that never
+  // report BWE at all (e.g. Firefox) never enter the budget regime — their
+  // LINK_CAPS come from the loss/RTT classification alone.
+  if (i.weakestBwe === null && (i.lastBudget ?? 0) > 0 && i.bweEver === true) {
+    if ((i.bweAge ?? Infinity) > HOLD_MAX_POLLS) {
+      const conservative = LINK_CAPS[1]
+      const target = conservative !== null ? Math.min(conservative, i.baseBitrate) : i.baseBitrate
+      return { target, scale: i.lastScale ?? 1, budgeted: false, share: target }
+    }
     return { target: i.lastBudget as number, scale: i.lastScale ?? 1, budgeted: false, share: i.lastBudget as number }
   }
-  const cap = LINK_CAPS[i.level]
-  const base = cap !== null ? Math.min(cap, i.baseBitrate) : i.baseBitrate
   if (i.weakestBwe === null) {
     return { target: base, scale: 1, budgeted: false, share: 0 }
   }

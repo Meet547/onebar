@@ -5,6 +5,15 @@
  * traces below are replayed through classifyLink / splitBudget /
  * cpuLadderTick / budgetChanged. Run via scripts/run-adaptive-tests.sh.
  *
+ * PROVENANCE (read this before trusting a green run): these tests verify
+ * that the DECISION LOGIC matches a Chrome-shaped transport model — nothing
+ * more. Where the simulator and the engine disagreed, each side was judged
+ * on its own merits: two ENGINE bugs the sim exposed were fixed in the
+ * engine (probe must lift the LINK_CAP too; app-limited echo must not feed
+ * the shared budget), while two simulator mistakes were fixed in the sim
+ * (missing prevLevel fallback; single-sample priming). A green run here does
+ * NOT substitute for shaped-network field runs — that remains the real test.
+ *
  * What the traces check:
  *   1. 3G profile classifies sanely (level 2, not 0).
  *   2. BWE warmup: a low startup estimate never causes an early downgrade.
@@ -13,15 +22,18 @@
  *      stable verdict (raw per-sample decisions would flap 0↔2).
  *   5. App-limited vs link-limited: a capped sender's echo estimate must not
  *      re-affirm the cap; a genuinely weak link still downgrades.
- *   6. Probe-up: closed-loop sim — without probing a recovered link stays
- *      locked low forever; with probing it climbs back within ~15 polls.
+ *   6. Probe-up closed loop: estimator ramp model — without probing a
+ *      recovered link stays locked low; a 3-poll probe recovers it; a
+ *      1-poll probe does NOT (too short); probes are skipped while the last
+ *      two polls saw loss; BWE silence expires the budget hold after
+ *      HOLD_MAX_POLLS; browsers that never report BWE keep the plain
+ *      loss/RTT regime.
  *   7. CPU ladder: escalation every 2 bad polls, one step per 10 clean,
  *      no jumps, resets when video send stops.
  *   8. Budget split: audio reserved first, weak peer scaled, screen exempt,
- *      probe lifts caps.
+ *      probe lifts caps, hold honored while fresh.
  *   9. Sender-rewrite hysteresis: no per-poll ping-pong.
  */
-const assert = require('node:assert')
 const {
   classifyLink,
   splitBudget,
@@ -31,6 +43,9 @@ const {
   avgSmooth,
   BWE_WARMUP_POLLS,
   PROBE_EVERY_POLLS,
+  PROBE_POLLS,
+  PROBE_LOSS_GUARD,
+  HOLD_MAX_POLLS,
   UPLOAD_BUDGET_SHARE,
 } = require(process.env.ADAPTIVE_CJS)
 
@@ -128,57 +143,176 @@ function eq(name, got, want) {
 /* ---- 6. Probe-up closed-loop sim: the lock-low feedback loop ---- */
 {
   // Real link recovered to 400 kbps, but an early episode left the cap at
-  // 90 kbps. The observed BWE can never exceed what we're allowed to send.
-  // Model the engine faithfully: sent = min(realLink, cap); the link is
-  // app-limited when sent ≈ cap AND observed ≈ cap; only link-limited (real)
-  // estimates set the shared budget.
+  // 90 kbps. Chrome's estimator is modeled honestly: it RAMPS gradually
+  // toward what it is allowed to send (50%/poll), and when the cap binds it
+  // collapses to the cap-echo immediately. Samples arrive fresh every poll
+  // unless `silence` says the estimate stream died.
   const REAL_LINK = 400_000
   const BASE = 550_000
-  const observed = (cap) => Math.min(REAL_LINK, Math.round(cap * 1.05))
-  const sent = (cap) => Math.min(REAL_LINK, cap)
-  const appLimited = (cap) => sent(cap) >= cap * 0.9 && observed(cap) <= cap * 1.2
+  const RAMP = 0.5
+  const audio = 24_000
 
-  // Without probing: locked low forever (the cap re-affirms itself).
-  {
-    let cap = 90_000
-    let prevLevel = 1 // an earlier weak episode left the call at level 1
-    let lastScale = 1
-    let locked = true
-    for (let i = 0; i < 40; i++) {
-      const bwe = appLimited(cap) ? null : observed(cap)
-      const lvl = classifyLink(0.03, 0.001, bwe, bwe === null ? { mode: 'ignore-bwe', fallback: prevLevel } : {})
-      prevLevel = lvl
-      const d = splitBudget({ weakestBwe: appLimited(cap) ? null : observed(cap), level: lvl, baseBitrate: BASE, audioPerPeer: 24_000, connectedPeers: 1, screenLive: false, probing: false, lastBudget: cap, lastScale })
-      cap = d.target
-      lastScale = d.scale
-      if (cap > 200_000) locked = false
+  const makeSim = () => ({
+    cap: 90_000, // lastBudget
+    scale: 1,
+    prevLevel: 1, // an earlier weak episode left the call at level 1
+    est: 90_000, // last observed estimate (echo while the cap binds)
+    lastProbe: 0, // engine: lastProbeTick starts 0 → first probe at tick 10
+    lastBweTick: 0,
+    lossHist: [0.001, 0.001], // healthy transport (loss is measured, not probed)
+    silence: false,
+    probingPrev: false, // probe window active during the PREVIOUS poll
+  })
+
+  // One poll, mirroring the engine's per-poll order: transport responds to
+  // last poll's window → classify → schedule the probe → budget decision.
+  const poll = (s, tick, probesEnabled, windowLen = PROBE_POLLS) => {
+    // 1) transport: the sender was allowed `allowed` during the last poll
+    const allowed = s.probingPrev ? BASE : s.cap
+    const targetEst = Math.min(REAL_LINK, allowed)
+    if (allowed > s.est) s.est = Math.round(s.est + (targetEst - s.est) * RAMP)
+    else s.est = Math.min(REAL_LINK, Math.round(allowed * 1.05))
+    const bweSample = s.silence ? null : s.est
+    if (bweSample !== null) s.lastBweTick = tick
+    const sent = Math.min(REAL_LINK, allowed)
+
+    // 2) classification (mirror engine: freshness gate + app-limited guard)
+    const appLimited =
+      !s.silence && s.cap > 0 && bweSample !== null && sent >= s.cap * 0.9 && bweSample <= s.cap * 1.2
+    const lvl = classifyLink(0.03, 0.001, bweSample, {
+      mode: appLimited ? 'ignore-bwe' : 'normal',
+      fallback: appLimited ? s.prevLevel : null,
+    })
+    s.prevLevel = lvl
+
+    // 3) probe scheduling (mirror engine; bytes land next poll)
+    const lossRecentBad = s.lossHist.slice(-2).some((v) => v > PROBE_LOSS_GUARD)
+    const eligible = lvl <= 2 || (s.cap > 0 && s.cap < BASE)
+    let probing = false
+    if (probesEnabled && eligible && !lossRecentBad) {
+      if (tick - s.lastProbe >= PROBE_EVERY_POLLS) s.lastProbe = tick
+      probing = s.lastProbe > 0 && tick - s.lastProbe < windowLen // only a SCHEDULED window
     }
-    ok('no probe-up → cap locked below 200 kbps forever', locked, cap)
+    s.probingPrev = probing
+
+    // 4) budget decision
+    const bweForBudget = appLimited ? null : bweSample
+    const d = splitBudget({
+      weakestBwe: bweForBudget,
+      level: lvl,
+      baseBitrate: BASE,
+      audioPerPeer: audio,
+      connectedPeers: 1,
+      screenLive: false,
+      probing,
+      lastBudget: s.cap,
+      lastScale: s.scale,
+      bweEver: s.lastBweTick > 0,
+      bweAge: s.lastBweTick > 0 ? tick - s.lastBweTick : Infinity,
+    })
+    s.cap = d.target
+    s.scale = d.scale
+    return { probing, lvl, cap: s.cap }
   }
-  // With probing every PROBE_EVERY_POLLS: the link climbs back — and once
-  // settled, the cap HOLDS between probes instead of ping-ponging.
+
+  // 6a. No probe at all → locked low forever.
   {
-    let cap = 90_000
-    let lastScale = 1
-    let prevLevel = 1
-    let lastProbe = -PROBE_EVERY_POLLS
-    let recovered = false
-    const nonProbeCaps = []
-    for (let tick = 1; tick <= 30; tick++) {
-      const probing = prevLevel <= 2 && tick - lastProbe >= PROBE_EVERY_POLLS
-      if (probing) lastProbe = tick
-      const bwe = appLimited(cap) && !probing ? null : observed(cap)
-      const lvl = classifyLink(0.03, 0.001, bwe, bwe === null ? { mode: 'ignore-bwe', fallback: prevLevel } : {})
-      prevLevel = lvl
-      const d = splitBudget({ weakestBwe: appLimited(cap) && !probing ? null : observed(cap), level: lvl, baseBitrate: BASE, audioPerPeer: 24_000, connectedPeers: 1, screenLive: false, probing, lastBudget: cap, lastScale })
-      cap = d.target
-      lastScale = d.scale
-      if (cap >= 200_000) recovered = true
-      if (!probing && tick > PROBE_EVERY_POLLS + 1) nonProbeCaps.push(cap)
+    const s = makeSim()
+    let locked = true
+    for (let tick = 1; tick <= 40; tick++) {
+      poll(s, tick, false)
+      if (s.cap > 200_000) locked = false
     }
-    ok('probe-up → recovered link climbs back above 200 kbps', recovered, cap)
-    const stable = nonProbeCaps.every((v) => v === nonProbeCaps[0])
-    ok('settled caps hold steady between probes (no ping-pong)', stable, nonProbeCaps)
+    ok('no probe-up → cap locked below 200 kbps forever', locked, s.cap)
+  }
+  // 6b. Full-length probe (PROBE_POLLS polls) → recovered, and the ramp
+  //     means recovery takes at least one full window.
+  {
+    const s = makeSim()
+    let recoveredAt = -1
+    const nonProbeCaps = []
+    for (let tick = 1; tick <= 40; tick++) {
+      const r = poll(s, tick, true)
+      if (s.cap >= 200_000 && recoveredAt < 0) recoveredAt = tick
+      if (!r.probing && tick > 15) nonProbeCaps.push(s.cap)
+    }
+    ok('probe-up (3-poll window) → recovered above 200 kbps', recoveredAt > 0, { recoveredAt, cap: s.cap })
+    ok('recovery takes a full probe window (estimator ramps)', recoveredAt >= PROBE_EVERY_POLLS, recoveredAt)
+    // Convergence is asymptotic (each window's estimate lands a little
+    // higher) — the ping-pong signature is a DOWN-jump, not a climb.
+    ok(
+      'settled caps never drop sharply between probes (no ping-pong)',
+      nonProbeCaps.every((v, i) => i === 0 || v >= nonProbeCaps[i - 1] * 0.95),
+      nonProbeCaps,
+    )
+  }
+  // 6c. One-poll probe (the old behavior) → does NOT recover: the estimator
+  //     never ramps far enough in a single 3 s window. Judge the SETTLED
+  //     cap (between probe polls), not the transient probe lift itself.
+  {
+    const s = makeSim()
+    const settled = []
+    for (let tick = 1; tick <= 60; tick++) {
+      const r = poll(s, tick, true, 1)
+      if (!r.probing) settled.push(s.cap)
+    }
+    ok('1-poll probe too short → still locked low', settled.every((v) => v < 200_000), settled.slice(-6))
+  }
+  // 6d. Loss guard: no probe is scheduled while the last two polls saw loss.
+  {
+    const s = makeSim()
+    s.lossHist = [0.25, 0.25]
+    let probed = 0
+    for (let tick = 1; tick <= 24; tick++) { // ends before the next probe window would start at 25
+      if (tick === 15) s.lossHist = [0.001, 0.001] // loss clears
+      const r = poll(s, tick, true)
+      if (r.probing) probed++
+    }
+    ok('probes resume only after recent loss clears', probed === PROBE_POLLS, probed)
+    const s2 = makeSim()
+    s2.lossHist = [0.25, 0.25]
+    let probed2 = 0
+    for (let tick = 1; tick <= 25; tick++) {
+      const r = poll(s2, tick, true) // loss never clears
+      if (r.probing) probed2++
+    }
+    eq('sustained loss → zero probes', probed2, 0)
+  }
+  // 6e. BWE silence: hold stands while samples were fresh, expires after
+  //     HOLD_MAX_POLLS to the conservative weak-link cap.
+  {
+    const s = makeSim()
+    for (let tick = 1; tick <= 40; tick++) poll(s, tick, true)
+    const heldCap = s.cap
+    s.silence = true // estimate stream dies right here
+    let expired = false
+    for (let tick = 41; tick <= 40 + HOLD_MAX_POLLS + 3; tick++) {
+      poll(s, tick, true)
+      if (s.cap <= 110_000) expired = true
+    }
+    ok('silence → hold expires to the conservative cap (LINK_CAPS[1])', expired && s.cap <= 110_000, { heldCap, cap: s.cap })
+    // probes still fire through silence and re-open the regime
+    s.silence = false
+    for (let tick = 54; tick <= 70; tick++) poll(s, tick, true)
+    ok('probes continue after silence → cap re-climbs', s.cap > 150_000, s.cap)
+  }
+  // 6f. Browsers that never report BWE: no budget regime, no hold expiry —
+  //     the loss/RTT LINK_CAPS rule alone.
+  {
+    const d = splitBudget({
+      weakestBwe: null,
+      level: 3,
+      baseBitrate: 550_000,
+      audioPerPeer: audio,
+      connectedPeers: 1,
+      screenLive: false,
+      probing: false,
+      lastBudget: 550_000,
+      lastScale: 1,
+      bweEver: false,
+      bweAge: Infinity,
+    })
+    eq('no BWE ever → plain profile cap (no conservative downgrade)', d.target, 550_000)
   }
 }
 

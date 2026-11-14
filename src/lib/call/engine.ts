@@ -97,6 +97,8 @@ import {
   BWE_WARMUP_POLLS,
   CPU_FPS_CAP,
   PROBE_EVERY_POLLS,
+  PROBE_LOSS_GUARD,
+  PROBE_POLLS,
   avgSmooth,
   budgetChanged,
   classifyLink,
@@ -140,6 +142,9 @@ interface LinkInfo {
   lastAudioCap: number
   /** Poll tick of the last probe-up poll (budget lifted so BWE can recover). */
   lastProbeTick: number
+  /** Poll tick of the last BWE sample — drives the budget-hold expiry (a
+   *  hold is only valid while the estimate stream is alive). */
+  lastBweTick: number
   /** Nominated pair's candidate types (host/srflx/prflx/relay), debug only. */
   candType: string
 }
@@ -826,6 +831,7 @@ export class CallEngine {
       lastScale: 1,
       lastAudioCap: 0,
       lastProbeTick: 0,
+      lastBweTick: 0,
       candType: '?',
     })
     this.makingOffer.set(peerId, false)
@@ -2024,10 +2030,19 @@ export class CallEngine {
       // one bad sample (task 3).
       const bweSmooth = avgSmooth(link?.bweHist)
       if (link) {
-        if (bwe !== null) pushSmooth(link.bweHist, bwe)
+        if (bwe !== null) {
+          pushSmooth(link.bweHist, bwe)
+          link.lastBweTick = this.pollTick
+        }
         if (loss !== null) pushSmooth(link.lossHist, loss)
         if (rtt !== null) pushSmooth(link.rttHist, rtt)
       }
+      // Freshness gate: a BWE sample that has not renewed this poll is STALE
+      // (transport-cc stalled, stats flake). Feeding a stale window into
+      // classification or the budget would ratchet the cap to the floor on
+      // old echo data — treat silence as unknown instead (hold expiry in
+      // splitBudget then downgrades conservatively after HOLD_MAX_POLLS).
+      const bweNow = !!link && link.lastBweTick === this.pollTick ? bweSmooth : null
 
       /* Anti-lock-low guards (corrected task 3): availableOutgoingBitrate
          starts near zero and only grows when the sender is allowed to probe.
@@ -2043,12 +2058,12 @@ export class CallEngine {
         !warmup &&
         !!link &&
         link.lastBudget > 0 &&
-        bweSmooth !== null &&
+        bweNow !== null &&
         sentKbps >= (link.lastBudget / 1000) * APP_LIMITED_FACTOR &&
-        bweSmooth <= link.lastBudget * 1.2
+        bweNow <= link.lastBudget * 1.2
       const ignoreBwe = warmup || appLimited
       const prevLevel = useCallStore.getState().peers[peerId]?.level
-      const level = classifyLink(avgSmooth(link?.rttHist), avgSmooth(link?.lossHist), bweSmooth, {
+      const level = classifyLink(avgSmooth(link?.rttHist), avgSmooth(link?.lossHist), bweNow, {
         mode: ignoreBwe ? 'ignore-bwe' : 'normal',
         fallback: warmup ? 3 : (prevLevel ?? null),
       })
@@ -2108,12 +2123,14 @@ export class CallEngine {
         level,
         candidateType: link?.candType ?? '?',
       })
-      const linkBwe = avgSmooth(link?.bweHist)
+      const linkBwe = bweNow
       // An app-limited link's estimate is our own cap echoed back — feeding
       // it into the shared budget would shrink the cap ~20% every poll until
       // the floor (the lock-low loop, caught by the offline tests). Only
-      // link-limited (real) estimates set the shared budget.
-      if (linkBwe !== null && !appLimited && (weakestBwe === null || linkBwe < weakestBwe)) {
+      // link-limited (real) estimates set the shared budget — and none at
+      // all during warmup: the startup estimate is a probe artifact, so the
+      // cold start must run uncapped until the estimator has ramped.
+      if (linkBwe !== null && !appLimited && !warmup && (weakestBwe === null || linkBwe < weakestBwe)) {
         weakestBwe = linkBwe
       }
     }
@@ -2127,8 +2144,10 @@ export class CallEngine {
        remainder split evenly across the video senders. A weak peer's SHARE
        shrinks and gets scaleResolutionDownBy on ITS sender — the shared
        camera capture keeps its size, so healthy links never lose picture
-       because of one bad one. Probe-up: every PROBE_EVERY_POLLS the budget is
-       lifted for one poll so the transport can probe upward again. ---- */
+       because of one bad one. Probe-up: every PROBE_EVERY_POLLS the caps are
+       lifted for PROBE_POLLS polls (≈9 s — the estimator ramps gradually) so
+       the transport can probe upward again; probes are skipped while the
+       last two polls saw fresh loss. ---- */
     const audioPerPeer = overall === 0 ? AUDIO_SENDER_BITRATE_WEAK : AUDIO_SENDER_BITRATE
 
     for (const [peerId, s] of sampled) {
@@ -2137,11 +2156,23 @@ export class CallEngine {
       if (!link || !sender) continue
       const cap = LINK_CAPS[s.level]
       const base = s.screenLive ? this.screenCaps().maxBitrate : this.resolveProfile().maxBitrate
-      // Probe-up: lift the budget for ONE poll so a link that recovered (or
-      // was never as bad as the capped estimate suggested) can climb back.
+      // Probe-up window: scheduled every PROBE_EVERY_POLLS and skipped while
+      // either of the last two polls saw fresh loss — probing into real loss
+      // briefly congests a genuinely weak link for nothing. Eligible whenever
+      // the level is capped OR a budget regime exists below the profile
+      // (keeps probes alive through BWE silence, where classification rides
+      // loss/RTT alone and may read level 3).
+      const sinceProbe = this.pollTick - link.lastProbeTick
+      const lossRecentBad = link.lossHist.slice(-2).some((v) => v > PROBE_LOSS_GUARD)
+      const probeEligible = !s.screenLive && (s.level <= 2 || (link.lastBudget > 0 && link.lastBudget < base))
+      if (probeEligible && sinceProbe >= PROBE_EVERY_POLLS && !lossRecentBad) {
+        link.lastProbeTick = this.pollTick // (re)start the probe window
+      }
       const probing =
-        !s.screenLive && s.level <= 2 && this.pollTick - link.lastProbeTick >= PROBE_EVERY_POLLS
-      if (probing) link.lastProbeTick = this.pollTick
+        probeEligible &&
+        !lossRecentBad &&
+        link.lastProbeTick > 0 && // probing exists only inside a SCHEDULED window
+        this.pollTick - link.lastProbeTick < PROBE_POLLS
       const { target, scale, share } = splitBudget({
         weakestBwe,
         level: s.level,
@@ -2152,6 +2183,8 @@ export class CallEngine {
         probing,
         lastBudget: link.lastBudget,
         lastScale: link.lastScale,
+        bweEver: link.bweHist.length > 0,
+        bweAge: link.lastBweTick > 0 ? this.pollTick - link.lastBweTick : Infinity,
       })
       // Hysteresis: rewrite sender params only on a >10% budget change or a
       // scale change — never per-poll ping-pong.
