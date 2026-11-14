@@ -66,6 +66,16 @@ export default function RootLayout({
       <body
         className={`${manrope.variable} ${geistMono.variable} font-sans antialiased bg-white text-foreground`}
       >
+        {/* App-shell service worker: repeat joins load from cache (public/sw.js).
+            HTTPS-only (SW requirement), production-only (keep dev uncached). */}
+        {process.env.NODE_ENV === "production" && (
+          <script
+            dangerouslySetInnerHTML={{
+              __html:
+                "if('serviceWorker' in navigator){addEventListener('load',function(){navigator.serviceWorker.register('/sw.js').catch(function(){})})}",
+            }}
+          />
+        )}
         {children}
         <Toaster
           position="top-center"

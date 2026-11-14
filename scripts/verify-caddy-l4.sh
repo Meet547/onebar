@@ -20,6 +20,10 @@ cat > Caddyfile.test <<'EOF'
 	servers :4430 {
 		listener_wrappers {
 			layer4 {
+				@acme tls alpn acme-tls/1
+				route @acme {
+					tls
+				}
 				@turn tls sni turn.example.com
 				route @turn {
 					proxy tcp/127.0.0.1:8443
@@ -33,6 +37,14 @@ cat > Caddyfile.test <<'EOF'
 https://web.example.com {
 	tls internal
 	respond "WEB-OK"
+}
+
+# Mirrors the production {$TURN_TLS_HOST} site block: without a cert policy
+# for the TURN host, caddy's tls handler in the @acme route has nothing to
+# terminate with and the connection falls through to the TURN backend.
+turn.example.com {
+	tls internal
+	respond 421
 }
 EOF
 
@@ -69,4 +81,16 @@ if ! echo "$SUBJ" | grep -q "turn.example.com"; then
   echo "PASS: unknown SNI never reaches the TURN backend (got: '${SUBJ:-no cert — handshake refused}')"
 else
   echo "FAIL: unknown SNI leaked into the TURN backend"
+fi
+
+echo "== ACME TLS-ALPN-01 challenge (ALPN acme-tls/1, SNI = TURN host) → intercepted by caddy, NOT proxied to coturn =="
+# If the challenge leaked into the TURN backend, the stand-in's cert would
+# come back. Caddy intercepting it means TLS-ALPN-01 issuance can succeed
+# through the multiplex (the cert here is caddy's internal CA or a failed
+# challenge — either way NOT the coturn stand-in).
+CH_CERT=$(openssl s_client -connect 127.0.0.1:4430 -servername turn.example.com -alpn acme-tls/1 </dev/null 2>/dev/null | openssl x509 -noout -subject 2>/dev/null)
+if ! echo "$CH_CERT" | grep -q "turn.example.com"; then
+  echo "PASS: ALPN challenge connection intercepted by caddy (stand-in cert not served)"
+else
+  echo "FAIL: ALPN challenge leaked into the TURN backend — TLS-ALPN-01 issuance would fail"
 fi

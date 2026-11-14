@@ -104,6 +104,7 @@ import {
   classifyLink,
   cpuLadderTick,
   pushSmooth,
+  probeEligibleFor,
   splitBudget,
   type CpuLadderState,
 } from './adaptive'
@@ -2158,13 +2159,20 @@ export class CallEngine {
       const base = s.screenLive ? this.screenCaps().maxBitrate : this.resolveProfile().maxBitrate
       // Probe-up window: scheduled every PROBE_EVERY_POLLS and skipped while
       // either of the last two polls saw fresh loss — probing into real loss
-      // briefly congests a genuinely weak link for nothing. Eligible whenever
-      // the level is capped OR a budget regime exists below the profile
-      // (keeps probes alive through BWE silence, where classification rides
-      // loss/RTT alone and may read level 3).
+      // briefly congests a genuinely weak link for nothing. Screen shares,
+      // Lite mode and saveData never probe (probeEligibleFor).
       const sinceProbe = this.pollTick - link.lastProbeTick
       const lossRecentBad = link.lossHist.slice(-2).some((v) => v > PROBE_LOSS_GUARD)
-      const probeEligible = !s.screenLive && (s.level <= 2 || (link.lastBudget > 0 && link.lastBudget < base))
+      const probeEligible = probeEligibleFor({
+        screenLive: s.screenLive,
+        lite: useCallStore.getState().lite,
+        saveData: (
+          navigator as Navigator & { connection?: { saveData?: boolean } }
+        ).connection?.saveData === true,
+        level: s.level,
+        lastBudget: link.lastBudget,
+        baseBitrate: base,
+      })
       if (probeEligible && sinceProbe >= PROBE_EVERY_POLLS && !lossRecentBad) {
         link.lastProbeTick = this.pollTick // (re)start the probe window
       }

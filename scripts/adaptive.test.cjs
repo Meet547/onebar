@@ -39,6 +39,7 @@ const {
   splitBudget,
   cpuLadderTick,
   budgetChanged,
+  probeEligibleFor,
   pushSmooth,
   avgSmooth,
   BWE_WARMUP_POLLS,
@@ -384,6 +385,28 @@ function eq(name, got, want) {
   eq('hysteresis: <10% change skipped', budgetChanged(56_000, 58_000, 4, 4), false)
   eq('hysteresis: >10% change applied', budgetChanged(56_000, 70_000, 4, 4), true)
   eq('hysteresis: scale change always applied', budgetChanged(56_000, 57_000, 4, 2), true)
+}
+
+/* ---- 10. Probe gate: Lite mode and saveData veto probing ---- */
+{
+  const g = (over) =>
+    probeEligibleFor({
+      screenLive: false,
+      lite: false,
+      saveData: false,
+      level: 2,
+      lastBudget: 0,
+      baseBitrate: 550_000,
+      ...over,
+    })
+  eq('gate: capped level → eligible', g({}), true)
+  eq('gate: budget regime below profile → eligible', g({ level: 3, lastBudget: 110_000, baseBitrate: 550_000 }), true)
+  eq('gate: level 3, no budget regime → not eligible', g({ level: 3, lastBudget: 0 }), false)
+  eq('gate: screen share → never probes', g({ screenLive: true }), false)
+  eq('gate: Lite mode → never probes', g({ lite: true }), false)
+  eq('gate: saveData → never probes', g({ saveData: true }), false)
+  eq('gate: Lite vetoes even inside a budget regime', g({ lite: true, level: 3, lastBudget: 110_000, baseBitrate: 550_000 }), false)
+  eq('gate: saveData vetoes even inside a budget regime', g({ saveData: true, level: 3, lastBudget: 110_000, baseBitrate: 550_000 }), false)
 }
 
 /* ---- warmup constant sanity ---- */

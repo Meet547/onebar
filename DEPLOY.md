@@ -198,13 +198,16 @@ convenience default, not a guarantee.
 
 Single IP, true 443 for both the website and TURN: a Caddy build with the
 layer4 module sniffs the TLS ClientHello on 443 — the ClientHello carrying
-the TURN domain's SNI is proxied (unterminated) to coturn's TLS port, every
-other ClientHello falls through to the ordinary HTTPS server.
+the TURN SNI hostname (`TURN_TLS_HOST`, default `turn.<PICO_DOMAIN>`) is
+proxied (unterminated) to coturn's TLS port, every other ClientHello falls
+through to the ordinary HTTPS server.
 
 This exact shape was validated end-to-end with Caddy 2.11.9 +
-`github.com/mholt/caddy-l4` (validate + live `openssl s_client` checks:
-TURN SNI reaches the TURN backend, web SNI reaches Caddy's HTTPS, unknown
-SNI is refused by Caddy — it never leaks into the TURN backend):
+`github.com/mholt/caddy-l4` (`scripts/verify-caddy-l4.sh`: validate + live
+`openssl s_client` checks — TURN SNI reaches the TURN backend, web SNI
+reaches Caddy's HTTPS, unknown SNI is refused by Caddy, and a TLS-ALPN-01
+challenge connection is intercepted by Caddy instead of leaking into the
+TURN backend):
 
 ```caddyfile
 # Build: xcaddy build --with github.com/mholt/caddy-l4
@@ -214,7 +217,16 @@ SNI is refused by Caddy — it never leaks into the TURN backend):
     servers :443 {
         listener_wrappers {
             layer4 {
-                @turn tls sni turn.example.com
+                # ACME TLS-ALPN-01 challenges must reach Caddy even when their
+                # SNI is the TURN host — route by ALPN BEFORE the SNI rule,
+                # otherwise Let's Encrypt issuance/renewal fails through the
+                # multiplex (verified: without this, the challenge leaks into
+                # the TURN backend).
+                @acme tls alpn acme-tls/1
+                route @acme {
+                    tls
+                }
+                @turn tls sni turn.example.com   # your TURN_TLS_HOST
                 route @turn {
                     # TLS passes through ENCRYPTED — coturn terminates it
                     # with the ACME cert; Caddy never sees the plaintext.
@@ -232,9 +244,21 @@ turn.example.com, call.example.com {
 }
 ```
 
+Certificate issuance for the TURN host: `Caddyfile.production` already
+carries a `{$TURN_TLS_HOST}` site block (responds 421) whose only job is to
+make Caddy obtain and renew that certificate into `caddy_data`, which coturn
+serves. **It requires a DNS record for `TURN_TLS_HOST`.** If you set
+`TURN_TLS_HOST` equal to `PICO_DOMAIN`, delete that site block — Caddy
+rejects duplicate site addresses, and the multiplex cannot share the web
+SNI anyway (all traffic for that name would go to coturn).
+
 Notes: coturn keeps `TURN_TLS_PORT=8443` as its LISTEN port (only reachable
 via loopback now — firewall 8443 externally); QUIC/HTTP-3 on 443/udp is
 untouched (coturn's turns: is TCP-only, and the layer4 wrapper handles TCP).
+Behind the multiplex every TLS client appears to coturn as 127.0.0.1 — that
+is fine: `denied-peer-ip`/`no-multicast-peers`/`no-loopback-peers` restrict
+relay *targets*, not client source IPs, and the allocation quotas are keyed
+by username, not IP (see the comments in `coturn/turnserver.conf`).
 
 ### Certificate renewal — do not skip this
 
@@ -245,12 +269,17 @@ cert until it expires, and TURN would die silently. The compose stack ships
 the fix:
 
 - the coturn entrypoint runs a **cert watcher** (5 min cadence,
-  `TURN_CERT_CHECK_INTERVAL` to tune): when the cert/key files change it
-  sends **SIGUSR2** to reload, logging `[coturn] turns: certificate changed`;
-- a **healthcheck** marks the container unhealthy when the relay process is
-  gone **or the certificate is within 14 days of expiry** — wire
+  `TURN_CERT_CHECK_INTERVAL` to tune) over the **fullchain** cert + key
+  Caddy stores for `TURN_TLS_HOST` (Caddy's `<host>.crt` is the fullchain):
+  when the files change it sends **SIGUSR2** to reload, logging
+  `[coturn] turns: certificate changed`;
+- a **healthcheck** (script generated at `/tmp/turn-health.sh`) marks the
+  container unhealthy when the relay process is gone, the certificate is
+  **missing/unreadable**, it is **within 14 days of expiry**, or it **does
+  not match `TURN_TLS_HOST`** (SAN or CN, wildcard suffix accepted) — wire
   `docker ps` health state (or `docker inspect --format '{{.State.Health.Status}}' coturn`)
-  into your monitor.
+  into your monitor. The mismatch check is what catches a stale
+  `TURN_TLS_HOST`/cert pairing before browsers start rejecting turns:.
 
 Set `TURN_TLS_443=0` to stop advertising the `turns:` entry entirely.
 The app logs a boot warning (and `/api/ice` warns + returns

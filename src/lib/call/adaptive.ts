@@ -165,6 +165,35 @@ export interface BudgetDecision {
   share: number
 }
 
+export interface ProbeGateInput {
+  /** Screen shares never probe (own preset caps, exempt from the budget). */
+  screenLive: boolean
+  /** Lite mode: audio-only send + receive-side shedding — there is no video
+   *  encoder left to ramp, so a probe window is pure waste. */
+  lite: boolean
+  /** navigator.connection.saveData — the user asked the browser to conserve
+   *  data; lifting caps to the profile bitrate burns exactly those bytes. */
+  saveData: boolean
+  /** Classified level for this link. */
+  level: NetworkLevel
+  /** Last applied budget (0 = nothing written yet). */
+  lastBudget: number
+  /** Profile/screen base bitrate for this sender. */
+  baseBitrate: number
+}
+
+/**
+ * Whether the probe-up window may be scheduled for this sender. Eligible when
+ * the level is capped OR a budget regime exists below the profile (keeps
+ * probes alive through BWE silence, where classification rides loss/RTT alone
+ * and may read level 3). Screen shares, Lite mode and saveData veto probing:
+ * all three exist precisely to minimize traffic.
+ */
+export function probeEligibleFor(i: ProbeGateInput): boolean {
+  if (i.screenLive || i.lite || i.saveData) return false
+  return i.level <= 2 || (i.lastBudget > 0 && i.lastBudget < i.baseBitrate)
+}
+
 export function splitBudget(i: BudgetInput): BudgetDecision {
   // Probe-up: lift EVERY cap for the probe window (budget AND the level's
   // LINK_CAP — the level may itself be pinned by the app-limited guard) so

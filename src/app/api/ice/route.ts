@@ -98,15 +98,18 @@ export async function GET() {
   }
 
   // TLS fallback: turns:<host>:<port>?transport=tcp — TLS on a TCP port
-  // reaches networks that drop everything else. Derived from the first TURN
-  // host so operators only configure TURN_URLS once. Default port follows the
-  // compose stack (8443 — TCP 443 belongs to Caddy on a single-IP host; see
-  // DEPLOY.md). The WHATWG URL parser treats 'turn:' as an opaque path with
-  // no hostname, so extract the host by regex.
+  // reaches networks that drop everything else. The host is TURN_TLS_HOST
+  // when set (the TURN SNI hostname whose dedicated LE certificate Caddy
+  // obtains and coturn serves — see DEPLOY.md), else the first TURN host.
+  // It MUST match the cert coturn actually serves or browsers reject the
+  // connection. Default port follows the compose stack (8443 — TCP 443
+  // belongs to Caddy on a single-IP host). The WHATWG URL parser treats
+  // 'turn:' as an opaque path with no hostname, so extract the host by regex.
   const tlsOn = process.env.TURN_TLS_443 !== '0'
   const tlsPort = Number(process.env.TURN_TLS_PORT ?? 8443)
   if (tlsOn) {
-    const host = urls[0].match(/^turns?:([^:@/?#]+):\d+/)?.[1]
+    const host =
+      process.env.TURN_TLS_HOST?.trim() || urls[0].match(/^turns?:([^:@/?#]+):\d+/)?.[1]
     if (host && tlsPort > 0 && tlsPort < 65_536) {
       urls.push(`turns:${host}:${tlsPort}?transport=tcp`)
     }

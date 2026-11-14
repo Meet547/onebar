@@ -41,3 +41,13 @@
 		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 	}
 }
+
+# TURN SNI hostname (TURN_TLS_HOST, default turn.<PICO_DOMAIN>): this block
+# exists ONLY so Caddy obtains and renews the Let's Encrypt certificate for
+# the TURN TLS host — coturn serves that cert from the shared caddy_data
+# volume, and the layer4 multiplex (see DEPLOY.md) matches its SNI. Requires
+# a DNS record for the name. If you set TURN_TLS_HOST equal to PICO_DOMAIN,
+# DELETE this block — Caddy rejects duplicate site addresses.
+{$TURN_TLS_HOST} {
+	respond 421
+}

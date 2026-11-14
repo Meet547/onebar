@@ -47,6 +47,11 @@ services:
       - TURN_URLS=turn:${PICO_DOMAIN}:3478?transport=udp,turn:${PICO_DOMAIN}:3478?transport=tcp
       - TURN_SECRET=${TURN_SECRET}
       - TURN_TLS_PORT=${TURN_TLS_PORT:-8443}
+      # Hostname of the turns: listener — the name whose certificate coturn
+      # serves and whose SNI the Caddy layer4 multiplex matches. Defaults to
+      # turn.<domain>; needs a DNS record for that name (Caddy obtains a
+      # dedicated LE cert for it). Must stay consistent with the Caddyfile.
+      - TURN_TLS_HOST=${TURN_TLS_HOST:-turn.${PICO_DOMAIN}}
       # The relay is its own supervised container here — the in-app embedded
       # relay is switched off, and the app's rewrites point at the container.
       - PICO_EMBEDDED_RELAY=0
@@ -95,20 +100,24 @@ services:
       - /bin/sh
       - -c
       - |
-        CRT=$(find /etc/coturn/acme -type f -name "${PICO_DOMAIN}.crt" 2>/dev/null | head -n1)
-        KEY=$(find /etc/coturn/acme -type f -name "${PICO_DOMAIN}.key" 2>/dev/null | head -n1)
+        TURN_HOST="${TURN_TLS_HOST:-turn.${PICO_DOMAIN}}"
+        CRT=$(find /etc/coturn/acme -type f -name "${TURN_HOST}.crt" 2>/dev/null | head -n1)
+        KEY=$(find /etc/coturn/acme -type f -name "${TURN_HOST}.key" 2>/dev/null | head -n1)
         if [ -n "$CRT" ] && [ -n "$KEY" ]; then
-          echo "[coturn] turns: serving the ACME certificate Caddy obtained for ${PICO_DOMAIN}"
+          echo "[coturn] turns: serving the ACME certificate for ${TURN_HOST} (Caddy storage; the .crt is the fullchain)"
         elif [ -n "${TURN_CERT_FILE:-}" ] && [ -n "${TURN_KEY_FILE:-}" ] && [ -f "${TURN_CERT_FILE}" ] && [ -f "${TURN_KEY_FILE}" ]; then
           CRT="${TURN_CERT_FILE}"; KEY="${TURN_KEY_FILE}"
           echo "[coturn] turns: serving TURN_CERT_FILE / TURN_KEY_FILE"
         else
+          if [ "${TURN_HOST}" != "${PICO_DOMAIN}" ]; then
+            echo "[coturn] WARNING: no certificate for ${TURN_HOST} in Caddy storage yet — check the DNS record for ${TURN_HOST} and that Caddy is running ('docker compose logs caddy' shows issuance)."
+          fi
           echo "[coturn] WARNING: no real certificate for turns:. Browsers VALIDATE TURN TLS certificates — self-signed gets rejected and the strict-firewall fallback will fail. Fix: start Caddy first (it obtains the LE cert), then 'docker compose restart coturn'; or mount TURN_CERT_FILE / TURN_KEY_FILE. See DEPLOY.md."
           mkdir -p /etc/coturn/certs
           [ -f /etc/coturn/certs/turn.crt ] && [ -f /etc/coturn/certs/turn.key ] || \
             openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
               -keyout /etc/coturn/certs/turn.key -out /etc/coturn/certs/turn.crt \
-              -subj "/CN=${PICO_DOMAIN}" >/dev/null 2>&1
+              -subj "/CN=${TURN_HOST}" >/dev/null 2>&1
           CRT=/etc/coturn/certs/turn.crt
           KEY=/etc/coturn/certs/turn.key
         fi
@@ -121,6 +130,24 @@ services:
             /etc/coturn/turnserver.conf.template > /tmp/turnserver.conf
         # Health/writer state for the healthcheck below and the watcher.
         echo "$CRT" > /tmp/turn-cert-path
+        echo "${TURN_HOST}" > /tmp/turn-host
+        cat > /tmp/turn-health.sh <<'HEALTH'
+        [ -r /tmp/turn-pid ] && kill -0 "$(cat /tmp/turn-pid)" 2>/dev/null || exit 1
+        CRT=$(cat /tmp/turn-cert-path 2>/dev/null)
+        [ -n "$CRT" ] && [ -r "$CRT" ] || exit 1
+        openssl x509 -checkend 1209600 -noout -in "$CRT" 2>/dev/null || exit 1
+        HOST=$(cat /tmp/turn-host 2>/dev/null)
+        [ -n "$HOST" ] || exit 1
+        SAN=$(openssl x509 -in "$CRT" -noout -ext subjectAltName 2>/dev/null)
+        SUBJ=$(openssl x509 -in "$CRT" -noout -subject 2>/dev/null)
+        echo "$SAN" | grep -qiF "DNS:$HOST" && exit 0
+        WILD="*.${HOST#*.}"
+        echo "$SAN" | grep -qiF "DNS:$WILD" && exit 0
+        echo "$SUBJ" | grep -qiE "CN *= *$HOST" && exit 0
+        echo "$SUBJ" | grep -qiF "CN = $WILD" && exit 0
+        echo "[coturn] health: certificate does not match ${HOST}" >&2
+        exit 1
+        HEALTH
 
         turnserver -c /tmp/turnserver.conf &
         TURN_PID=$!
@@ -143,11 +170,12 @@ services:
           fi
         done
         wait "$TURN_PID"
-    # Fails (→ unhealthy) when the relay process is gone OR the turns:
-    # certificate is within 14 days of expiry — i.e. the renewal pipeline
-    # is broken and the strict-firewall fallback is about to die.
+    # Fails (→ unhealthy) when the relay process is gone, the turns:
+    # certificate is missing/unreadable, it is within 14 days of expiry, or
+    # it does not match TURN_TLS_HOST (SAN/CN) — i.e. the renewal pipeline is
+    # broken or the SNI host and the served cert disagree.
     healthcheck:
-      test: ["CMD-SHELL", "kill -0 $(cat /tmp/turn-pid) 2>/dev/null && openssl x509 -checkend 1209600 -noout -in $(cat /tmp/turn-cert-path)"]
+      test: ["CMD-SHELL", "/bin/sh /tmp/turn-health.sh"]
       interval: 1h
       timeout: 10s
       retries: 2
@@ -163,6 +191,8 @@ services:
       - "443:443/udp"
     environment:
       - PICO_DOMAIN=${PICO_DOMAIN}
+      # Site block below obtains/renews the LE cert for the TURN SNI host.
+      - TURN_TLS_HOST=${TURN_TLS_HOST:-turn.${PICO_DOMAIN}}
     volumes:
       - ./Caddyfile.production:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
