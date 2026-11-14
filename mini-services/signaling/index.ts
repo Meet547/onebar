@@ -212,6 +212,18 @@ io.on('connection', (socket: Socket) => {
     if (hostId) io.to(roomId).emit('host:changed', { hostId })
   }
 
+  // Version handshake (engine sends it on every connect): echo the server
+  // build so the client can one-shot reload when a deploy moved under it.
+  // Mismatch semantics mirror src/lib/version.ts (unknown either side → no
+  // reload); duplicated here because this service ships as a standalone
+  // package that cannot import from the app source tree.
+  const SERVER_VERSION = process.env.PICO_VERSION ?? null
+  socket.on('version:hello', (raw: unknown) => {
+    const client = (raw as { client?: string } | null)?.client ?? null
+    const clientMatches = !client || !SERVER_VERSION || client === SERVER_VERSION
+    socket.emit('version:current', { server: SERVER_VERSION, clientMatches })
+  })
+
   socket.on('room:join', (raw: unknown, ack?: (r: unknown) => void) => {
     try {
       const data = (raw ?? {}) as Record<string, unknown>

@@ -51,7 +51,7 @@ and nothing static is exposed.
 | A VPS | 1 vCPU / 1 GB RAM is genuinely enough for dozens of concurrent rooms (signaling is tiny; media doesn't flow through it) |
 | A domain | `call.example.com` → the VPS IP (A/AAAA record) |
 | Docker + compose plugin | `docker` and `docker compose` |
-| Open firewall ports | `80/tcp`, `443/tcp` (Caddy), `3478/udp+tcp` (TURN), `8443/tcp` on the coturn IP (TURN TLS default — see below), `49160–49200/udp` (TURN relay range) |
+| Open firewall ports | `80/tcp`, `443/tcp` (Caddy), `3478/udp+tcp` (TURN), `8443/tcp` on the coturn IP (TURN TLS default — see below), `49152–65535/udp` (TURN relay range) |
 
 ---
 
@@ -80,7 +80,7 @@ require both the OS firewall *and* the cloud firewall rules):
 ```bash
 ufw allow 80/tcp && ufw allow 443/tcp
 ufw allow 3478/udp && ufw allow 3478/tcp
-ufw allow 49160:49200/udp
+ufw allow 49152:65535/udp
 ```
 
 ### 3 · Launch

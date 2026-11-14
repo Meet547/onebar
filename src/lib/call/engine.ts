@@ -108,6 +108,7 @@ import {
   splitBudget,
   type CpuLadderState,
 } from './adaptive'
+import { versionMismatch, checkAndMarkReload, AUTO_RELOAD_KEY } from '../version'
 
 export type MediaMode = 'full' | 'audio' | 'none'
 
@@ -391,7 +392,21 @@ export class CallEngine {
     }
     socket.on('connect', () => {
       useCallStore.getState().setSignalingConnected(true)
+      // Version handshake: tell the relay which build this page is, get the
+      // server's back. A mismatch means a deploy moved under a long-lived
+      // tab — reload once (guarded) so the tab runs the same build as the
+      // signals it exchanges. Chunk-failure reloads are handled separately
+      // by public/version-guard.js.
+      socket.emit('version:hello', { client: process.env.NEXT_PUBLIC_PICO_VERSION ?? null })
       if (this.myId) this.rejoin()
+    })
+    socket.on('version:current', (d: { server?: string } | undefined) => {
+      const client = process.env.NEXT_PUBLIC_PICO_VERSION ?? null
+      const server = d?.server ?? null
+      if (versionMismatch(client, server)) {
+        console.warn(`[pico] version mismatch: client ${client} vs relay ${server} — auto-reload`)
+        this.maybeAutoReload('version-mismatch')
+      }
     })
     socket.on('disconnect', () => useCallStore.getState().setSignalingConnected(false))
     socket.on('connect_error', () => useCallStore.getState().setSignalingConnected(false))
@@ -1590,6 +1605,33 @@ export class CallEngine {
   }
 
   /* ---------------- lite mode (task 8) ---------------- */
+
+  /**
+   * One-shot auto-reload, shared by the socket version check and any future
+   * trigger. Guarded in src/lib/version.ts: at most one reload per 60 s per
+   * session, so a mismatch that survives a reload can never trap the user
+   * in a refresh loop. The public/version-guard.js chunk-failure path uses
+   * the same sessionStorage key and interval.
+   */
+  maybeAutoReload(reason: string) {
+    const readLast = () => {
+      try {
+        const v = Number(sessionStorage.getItem(AUTO_RELOAD_KEY))
+        return v > 0 ? v : null
+      } catch {
+        return null
+      }
+    }
+    const mark = () => {
+      try {
+        sessionStorage.setItem(AUTO_RELOAD_KEY, String(Date.now()))
+      } catch {
+        /* storage disabled */
+      }
+    }
+    if (checkAndMarkReload(Date.now(), readLast, mark)) window.location.reload()
+    else console.warn(`[pico] ${reason}: reload suppressed (already reloaded recently)`)
+  }
 
   /**
    * One-click Lite: audio-only SEND (camera off, announced to peers) plus

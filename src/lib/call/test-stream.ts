@@ -47,11 +47,11 @@ export async function createTestStream(): Promise<MediaStream> {
     }
 
     ctx.fillStyle = 'rgba(255,255,255,0.55)'
-    ctx.font = '600 17px Manrope, -apple-system, system-ui, sans-serif'
+    ctx.font = '600 17px system-ui, -apple-system, "Segoe UI", sans-serif'
     ctx.textAlign = 'center'
     ctx.fillText('Pico test signal', canvas.width / 2, 56)
     ctx.fillStyle = 'rgba(255,255,255,0.3)'
-    ctx.font = '500 13px Geist Mono, monospace'
+    ctx.font = '500 13px ui-monospace, "SF Mono", Menlo, monospace'
     ctx.fillText(new Date().toLocaleTimeString(), canvas.width / 2, canvas.height - 34)
   }
   draw()
@@ -114,11 +114,11 @@ export async function createTestScreenStream(): Promise<MediaStream> {
 
     // flat slide: heading, body lines, a moving progress bar
     ctx.fillStyle = '#ffffff'
-    ctx.font = '700 44px Manrope, -apple-system, system-ui, sans-serif'
+    ctx.font = '700 44px system-ui, -apple-system, "Segoe UI", sans-serif'
     ctx.textAlign = 'left'
     ctx.fillText('Shared screen — Pico', 64, 110)
     ctx.fillStyle = 'rgba(255,255,255,0.35)'
-    ctx.font = '500 22px Manrope, sans-serif'
+    ctx.font = '500 22px system-ui, -apple-system, "Segoe UI", sans-serif'
     for (let i = 0; i < 4; i++) {
       ctx.fillRect(64, 170 + i * 44, 460 - i * 60, 14)
     }
@@ -126,7 +126,7 @@ export async function createTestScreenStream(): Promise<MediaStream> {
     ctx.fillStyle = '#30d158'
     ctx.fillRect(64, 420, w, 18)
     ctx.fillStyle = 'rgba(255,255,255,0.55)'
-    ctx.font = '500 18px Geist Mono, monospace'
+    ctx.font = '500 18px ui-monospace, "SF Mono", Menlo, monospace'
     ctx.fillText(new Date().toLocaleTimeString(), 64, 490)
   }
   draw()

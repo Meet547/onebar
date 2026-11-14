@@ -1,18 +1,6 @@
 import type { Metadata, Viewport } from "next";
-import { Manrope, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "sonner";
-
-const manrope = Manrope({
-  variable: "--font-manrope",
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700", "800"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
 
 const TITLE = "Pico — calls that weigh nothing";
 const DESCRIPTION =
@@ -63,19 +51,10 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body
-        className={`${manrope.variable} ${geistMono.variable} font-sans antialiased bg-white text-foreground`}
-      >
-        {/* App-shell service worker: repeat joins load from cache (public/sw.js).
-            HTTPS-only (SW requirement), production-only (keep dev uncached). */}
-        {process.env.NODE_ENV === "production" && (
-          <script
-            dangerouslySetInnerHTML={{
-              __html:
-                "if('serviceWorker' in navigator){addEventListener('load',function(){navigator.serviceWorker.register('/sw.js').catch(function(){})})}",
-            }}
-          />
-        )}
+      <body className="font-sans antialiased bg-white text-foreground">
+        {/* Version guard: registers the app-shell service worker and reloads
+            once when a hashed chunk fails (deploy under a long-lived tab). */}
+        <script src="/version-guard.js" defer />
         {children}
         <Toaster
           position="top-center"
@@ -85,7 +64,7 @@ export default function RootLayout({
               borderRadius: "16px",
               fontSize: "13px",
               fontWeight: 600,
-              fontFamily: "var(--font-manrope)",
+              fontFamily: "var(--font-sans)",
               background: "rgba(13,13,15,0.92)",
               color: "#fff",
               border: "none",

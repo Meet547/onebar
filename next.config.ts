@@ -1,6 +1,20 @@
 import type { NextConfig } from "next";
+import fs from "node:fs";
+
+// Deployment version: PICO_VERSION env when set (compose passes it to the
+// build and to every service at runtime), else package.json's version.
+// One source, three consumers that MUST agree:
+//  - client bundle (NEXT_PUBLIC_PICO_VERSION below → socket version check),
+//  - every HTTP response (x-pico-version header → service worker cache
+//    versioning),
+//  - /api/health (server version reporting).
+const pkgVersion = (JSON.parse(
+  fs.readFileSync(new URL("./package.json", import.meta.url), "utf8"),
+) as { version?: string }).version;
+const PICO_VERSION = process.env.PICO_VERSION || pkgVersion || "dev";
 
 const nextConfig: NextConfig = {
+  env: { NEXT_PUBLIC_PICO_VERSION: PICO_VERSION },
   // src/instrumentation.ts keeps the signaling relay alive (see that file).
   output: "standalone",
   // The signaling relay is embedded in the Next.js server process (see
@@ -46,6 +60,9 @@ const nextConfig: NextConfig = {
           { key: "X-Content-Type-Options", value: "nosniff" },
           // Invite links contain the room code; never leak it via Referer.
           { key: "Referrer-Policy", value: "no-referrer" },
+          // Deployment version — the service worker keys its per-version
+          // caches off this; /api/health reports it too.
+          { key: "x-pico-version", value: PICO_VERSION },
           // Only this origin may open cameras, microphones and screen capture.
           {
             key: "Permissions-Policy",

@@ -1,5 +1,11 @@
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from 'http'
 import { Server as IoServer, type Socket } from 'socket.io'
+import { versionMismatch } from './version'
+
+/** Server build identity, answered to the client's version:hello handshake
+ *  (see the engine's connect handler). Same value as the app's NEXT_PUBLIC
+ *  inlined version when both containers share PICO_VERSION. */
+const SERVER_VERSION = process.env.PICO_VERSION ?? null
 
 /**
  * Pico — embedded in-process signaling relay.
@@ -230,6 +236,16 @@ function attachRelay(httpServer: ReturnType<typeof createHttpServer>): IoServer 
       room.hostId = hostId
       if (hostId) io.to(roomId).emit('host:changed', { hostId })
     }
+
+    // Version handshake (engine sends it on every connect): echo the server
+    // build so the client can one-shot reload when a deploy moved under it.
+    socket.on('version:hello', (raw: unknown) => {
+      const client = (raw as { client?: string } | null)?.client ?? null
+      socket.emit('version:current', {
+        server: SERVER_VERSION,
+        clientMatches: !versionMismatch(client, SERVER_VERSION),
+      })
+    })
 
     socket.on('room:join', (raw: unknown, ack?: (r: unknown) => void) => {
       try {

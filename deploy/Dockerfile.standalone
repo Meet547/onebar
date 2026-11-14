@@ -22,10 +22,16 @@ ARG NEXT_PUBLIC_SIGNALING_URL=/
 ARG NEXT_PUBLIC_SOCKET_PATH=/socket.io
 ARG NEXT_PUBLIC_ROOM_INFO_URL=/info
 ARG NEXT_PUBLIC_SITE_URL=http://localhost:3000
+# Deployment version: must be passed to the build AND to the runtime stage
+# (below) so the client bundle, the x-pico-version header and /api/health
+# all report the same value — that agreement is what the socket version
+# handshake and the service worker's per-version caches rely on.
+ARG PICO_VERSION=
 ENV NEXT_PUBLIC_SIGNALING_URL=$NEXT_PUBLIC_SIGNALING_URL \
     NEXT_PUBLIC_SOCKET_PATH=$NEXT_PUBLIC_SOCKET_PATH \
     NEXT_PUBLIC_ROOM_INFO_URL=$NEXT_PUBLIC_ROOM_INFO_URL \
     NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL \
+    PICO_VERSION=$PICO_VERSION \
     NEXT_TELEMETRY_DISABLED=1
 
 RUN bun run build
@@ -36,6 +42,9 @@ ENV NODE_ENV=production \
     PORT=3000 \
     HOSTNAME=0.0.0.0 \
     NEXT_TELEMETRY_DISABLED=1
+# Runtime half of the version contract (see the builder stage above).
+ARG PICO_VERSION=
+ENV PICO_VERSION=$PICO_VERSION
 COPY --from=builder /app ./
 EXPOSE 3000
 CMD ["npx", "next", "start"]

@@ -8,7 +8,7 @@
 #   signaling  socket.io relay + room-info probe internal :3003 / :3004
 #   coturn     TURN/STUN relay (NAT fallback)    host network :3478/udp+tcp,
 #                                                :8443/tcp TLS (turns:, TURN_TLS_PORT),
-#                                                :49160-49200/udp
+#                                                :49152-65535/udp
 #   caddy      automatic HTTPS gateway           :80, :443
 #
 # coturn uses host networking (the only reliable way to get real relay IPs);
@@ -34,6 +34,9 @@ services:
         NEXT_PUBLIC_SOCKET_PATH: /socket.io
         NEXT_PUBLIC_ROOM_INFO_URL: ${PICO_ROOM_INFO_URL:-/info}
         NEXT_PUBLIC_SITE_URL: https://${PICO_DOMAIN}
+        # Build identity — must equal the runtime PICO_VERSION below so the
+        # client bundle (socket handshake) and the x-pico-version header agree.
+        PICO_VERSION: ${PICO_VERSION:-}
     image: pico-app
     restart: unless-stopped
     expose:
@@ -47,6 +50,12 @@ services:
       - TURN_URLS=turn:${PICO_DOMAIN}:3478?transport=udp,turn:${PICO_DOMAIN}:3478?transport=tcp
       - TURN_SECRET=${TURN_SECRET}
       - TURN_TLS_PORT=${TURN_TLS_PORT:-8443}
+      # Deployment version: socket version handshake + x-pico-version header
+      # + /api/health. Set it in .env (e.g. the git short SHA) and bump per
+      # deploy — that is what triggers the one-shot client auto-reload.
+      - PICO_VERSION=${PICO_VERSION:-}
+      # Live TURN allocation stats (written by coturn's stats loop, below).
+      - TURN_STATS_FILE=/etc/coturn/stats/turn-stats.json
       # Hostname of the turns: listener — the name whose certificate coturn
       # serves and whose SNI the Caddy layer4 multiplex matches. Defaults to
       # turn.<domain>; needs a DNS record for that name (Caddy obtains a
@@ -57,6 +66,9 @@ services:
       - PICO_EMBEDDED_RELAY=0
       - RELAY_UPSTREAM=http://signaling:3003
       - INFO_UPSTREAM=http://signaling:3004
+    volumes:
+      # coturn's live allocation stats (see /api/health), read-only.
+      - coturn_stats:/etc/coturn/stats:ro
     networks:
       - pico
 
@@ -72,6 +84,8 @@ services:
       - INFO_PORT=3004
       - SOCKET_PATH=/socket.io
       - ORIGIN=https://${PICO_DOMAIN}
+      # Answered back in the socket version handshake (see version:hello).
+      - PICO_VERSION=${PICO_VERSION:-}
     networks:
       - pico
 
@@ -89,6 +103,8 @@ services:
       - caddy_data:/etc/coturn/acme:ro
       # Fallback store for the (discouraged) self-signed mint.
       - coturn_certs:/etc/coturn/certs
+      # Live allocation stats for /api/health (the stats loop writes here).
+      - coturn_stats:/etc/coturn/stats
     # Substitute the template placeholders, locate the real ACME cert, run,
     # and watch the certificate files: coturn only re-reads certificates on
     # SIGUSR2 (SIGHUP just resets the log file), so without this watcher a
@@ -153,6 +169,31 @@ services:
         TURN_PID=$!
         echo "$TURN_PID" > /tmp/turn-pid
         trap 'kill -TERM "$TURN_PID" 2>/dev/null' TERM INT
+        # Live allocation stats for /api/health (shared read-only with the
+        # app). Each allocation binds one UDP socket in the relay range, so
+        # counting those sockets counts allocations — exact when the
+        # recommended ip_local_port_range sysctl keeps the range
+        # coturn-exclusive, an upper bound otherwise.
+        UQ=$(sed -n 's/^user-quota=//p' /tmp/turnserver.conf | head -n1)
+        TQ=$(sed -n 's/^total-quota=//p' /tmp/turnserver.conf | head -n1)
+        MINP=$(sed -n 's/^min-port=//p' /tmp/turnserver.conf | head -n1)
+        MAXP=$(sed -n 's/^max-port=//p' /tmp/turnserver.conf | head -n1)
+        mkdir -p /etc/coturn/stats
+        (
+          while kill -0 "$TURN_PID" 2>/dev/null; do
+            # Hex port → decimal via digit lookup: mawk (the container's awk)
+            # does not parse "0xEE4E"-style strings numerically.
+            N=$(awk -v lo="$MINP" -v hi="$MAXP" \
+              'function h2d(s,  i, c, n, r) { r = 0; s = toupper(s); for (i = 1; i <= length(s); i++) { c = substr(s, i, 1); n = index("0123456789ABCDEF", c) - 1; if (n < 0) continue; r = r * 16 + n } return r }
+               { split($2, a, ":"); if (length(a[2]) == 4) { p = h2d(a[2]); if (p >= lo && p <= hi) n++ } } END { print n + 0 }' \
+              /proc/net/udp /proc/net/udp6 2>/dev/null)
+            printf '{"ts":%s,"allocations":%s,"relayPorts":[%s,%s],"userQuota":%s,"totalQuota":%s}\n' \
+              "$(date +%s)000" "${N:-0}" "${MINP:-49152}" "${MAXP:-65535}" "${UQ:-0}" "${TQ:-0}" \
+              > /etc/coturn/stats/turn-stats.json.tmp 2>/dev/null \
+              && mv /etc/coturn/stats/turn-stats.json.tmp /etc/coturn/stats/turn-stats.json
+            sleep "${TURN_STATS_INTERVAL:-10}"
+          done
+        ) &
         # Renewal watcher: reload on certificate change. coturn reloads
         # certs on SIGUSR2 only (coturn issue #725 — SIGHUP resets the log).
         LAST=$(sha256sum "$CRT" "$KEY" 2>/dev/null | sha256sum | cut -d" " -f1)
@@ -180,7 +221,7 @@ services:
       timeout: 10s
       retries: 2
       start_period: 30s
-    # 3478/udp+tcp (TURN), TURN_TLS_PORT/tcp (turns: TLS), 49160-49200/udp are bound by the conf
+    # 3478/udp+tcp (TURN), TURN_TLS_PORT/tcp (turns: TLS), 49152-65535/udp are bound by the conf
 
   caddy:
     image: caddy:2
@@ -207,6 +248,7 @@ volumes:
   caddy_data:
   caddy_config:
   coturn_certs:
+  coturn_stats:
 
 networks:
   pico:
