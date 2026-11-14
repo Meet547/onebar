@@ -11,6 +11,18 @@ export async function registerNode() {
   if (g.__picoSignalingSpawn) return
   g.__picoSignalingSpawn = (async () => {
     try {
+      // Connectivity health check: without TURN, strict-NAT pairs (carriers,
+      // hotel/office Wi-Fi) cannot connect at all — warn loudly at boot.
+      if (!process.env.TURN_URLS) {
+        console.warn(
+          '[pico] /api/ice is STUN-only — strict-NAT pairs will fail. ' +
+            'Set TURN_URLS + TURN_SECRET (deploy/.env.example) and run coturn (deploy/docker-compose.yml).',
+        )
+      } else if (process.env.TURN_TLS_443 !== '0') {
+        const tlsPort = process.env.TURN_TLS_PORT ?? '443'
+        console.log(`[pico] TURN enabled incl. turns: TCP ${tlsPort} (TLS fallback)`)
+      }
+
       const net = await import('node:net')
       const alive = await new Promise<boolean>((resolve) => {
         const probe = net.connect(3003, '127.0.0.1')

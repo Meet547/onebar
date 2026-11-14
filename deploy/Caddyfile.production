@@ -5,6 +5,10 @@
 #              -> internal :3004   (room-info probe + /health)
 #
 # WebSocket upgrade on /socket.io is handled automatically by Caddy.
+#
+# NOTE on TCP 443: coturn (host network) also wants 443/tcp for its turns:
+# TLS listener. If coturn has its own public IP, no conflict — leave it on 443.
+# On a single-IP host set TURN_TLS_PORT=8443 in .env so Caddy keeps 443 here.
 
 {$PICO_DOMAIN} {
 	encode zstd gzip

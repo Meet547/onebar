@@ -2,12 +2,18 @@
 
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
+import dynamic from 'next/dynamic'
 import { getEngine } from '@/lib/call/engine'
 import { useCallStore } from '@/lib/call/store'
 import { generateRoomCode, hashPasscode } from '@/lib/call/types'
 import { Home } from '@/components/call/home'
 import { PreJoin } from '@/components/call/prejoin'
-import { Room } from '@/components/call/room'
+
+// Room (grid, panels, the whole in-call UI) is a separate chunk (task 11):
+// the landing page never downloads it.
+const Room = dynamic(() => import('@/components/call/room').then((m) => m.Room), {
+  ssr: false,
+})
 
 type View = 'home' | 'prejoin' | 'room'
 

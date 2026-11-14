@@ -122,17 +122,19 @@ export const LINK_CAPS: Record<NetworkLevel, number | null> = {
  * screen capture (full resolution, up to 60 fps, no bitrate ceiling) these
  * caps cut encoder CPU by roughly an order of magnitude, which is what keeps
  * the sharer's machine — and everyone's viewer — smooth.
+ *
+ * Capture size follows the bitrate budget (task 9): 220 kbps carries a
+ * readable 720p at 5 fps but not a 1080p slideshow — so saver captures 720p,
+ * balanced/sharp get the full 1080p their budgets can carry.
  */
-export const SCREEN_SHARE: Record<Exclude<QualityPreset, 'auto'>, { maxBitrate: number; maxFps: number }> = {
-  saver: { maxBitrate: 220_000, maxFps: 8 },
-  balanced: { maxBitrate: 600_000, maxFps: 15 },
-  sharp: { maxBitrate: 1_100_000, maxFps: 24 },
+export const SCREEN_SHARE: Record<
+  Exclude<QualityPreset, 'auto'>,
+  { maxBitrate: number; maxFps: number; maxWidth: number; maxHeight: number }
+> = {
+  saver: { maxBitrate: 220_000, maxFps: 5, maxWidth: 1280, maxHeight: 720 },
+  balanced: { maxBitrate: 600_000, maxFps: 15, maxWidth: 1920, maxHeight: 1080 },
+  sharp: { maxBitrate: 1_100_000, maxFps: 24, maxWidth: 1920, maxHeight: 1080 },
 }
-
-/** Capture ceiling — 1080p reads fine for any screen content and keeps
- *  the encoder (and the viewer's decoder) cheap on low-end devices. */
-export const SCREEN_MAX_WIDTH = 1920
-export const SCREEN_MAX_HEIGHT = 1080
 
 export const ROOM_CODE_CHARS = 'abcdefghjkmnpqrstuvwxyz23456789'
 

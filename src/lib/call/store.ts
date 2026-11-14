@@ -26,6 +26,27 @@ export interface SelfState {
   sharing: boolean
 }
 
+/** Debug overlay snapshot (?debug=1) — written every 3 s by the engine. */
+export interface DebugPeerInfo {
+  id: string
+  kbpsUp: number
+  kbpsDown: number
+  level: NetworkLevel
+  candidateType: string
+}
+
+export interface DebugInfo {
+  level: NetworkLevel
+  /** Smoothed outgoing bandwidth estimate, weakest link (kbps). */
+  bweKbps: number
+  /** This peer's share of the upload budget (kbps). */
+  budgetKbps: number
+  cpuReason: string
+  cpuStep: number
+  encodeMsPerFrame: number
+  peers: DebugPeerInfo[]
+}
+
 interface CallStore {
   signalingConnected: boolean
   self: SelfState
@@ -47,6 +68,12 @@ interface CallStore {
   kicked: boolean
   /** Listen-together state (one music session per room). */
   music: MusicState
+  /** Lite mode (task 8): audio-only send + speaker-only receive. */
+  lite: boolean
+  /** True when lite was auto-enabled from connection hints, not the user. */
+  liteAuto: boolean
+  /** Debug overlay snapshot, only when ?debug=1. */
+  debug: DebugInfo | null
 
   setSignalingConnected: (v: boolean) => void
   setSelf: (partial: Partial<SelfState>) => void
@@ -66,6 +93,8 @@ interface CallStore {
   setPasscodeProtected: (v: boolean) => void
   setKicked: (v: boolean) => void
   setMusic: (partial: Partial<MusicState>) => void
+  setLite: (v: boolean, auto?: boolean) => void
+  setDebug: (d: DebugInfo | null) => void
   reset: () => void
 }
 
@@ -87,6 +116,9 @@ export const useCallStore = create<CallStore>((set, get) => ({
   passcodeProtected: false,
   kicked: false,
   music: INITIAL_MUSIC,
+  lite: false,
+  liteAuto: false,
+  debug: null,
 
   setSignalingConnected: (v) => set({ signalingConnected: v }),
   setSelf: (partial) => set((s) => ({ self: { ...s.self, ...partial } })),
@@ -135,6 +167,8 @@ export const useCallStore = create<CallStore>((set, get) => ({
   setPasscodeProtected: (v) => set({ passcodeProtected: v }),
   setKicked: (v) => set({ kicked: v }),
   setMusic: (partial) => set((s) => ({ music: { ...s.music, ...partial } })),
+  setLite: (v, auto = false) => set({ lite: v, liteAuto: auto }),
+  setDebug: (d) => set({ debug: d }),
   reset: () =>
     set({
       signalingConnected: false,
@@ -150,5 +184,6 @@ export const useCallStore = create<CallStore>((set, get) => ({
       passcodeProtected: false,
       kicked: false,
       music: INITIAL_MUSIC,
+      debug: null,
     }),
 }))

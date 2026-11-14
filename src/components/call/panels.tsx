@@ -33,7 +33,9 @@ import {
 import { useCallStore } from '@/lib/call/store'
 import { getEngine } from '@/lib/call/engine'
 import { type ChatMessage, type QualityPreset } from '@/lib/call/types'
-import { createFileMusicHandle, createTestMusicHandle, setRemoteMusicVolume, type MusicHandle } from '@/lib/call/music'
+// music.ts is dynamic-imported below (task 11) — the listen-together module
+// stays out of the first-load bundle; only this type import is erased.
+import type { MusicHandle } from '@/lib/call/music'
 import { NetworkBars, LEVEL_LABEL } from './network-bars'
 
 /* ------------------------------------------------------------------ */
@@ -506,6 +508,14 @@ export function MusicPanel({ onClose }: { onClose: () => void }) {
   const [starting, setStarting] = useState(false)
   const testMode = typeof window !== 'undefined' && window.location.search.includes('test=1')
 
+  // music.ts is loaded on panel open (task 11): a lazy one-off the bundle
+  // never carries on first paint.
+  const musicRef = useRef<typeof import('@/lib/call/music') | null>(null)
+  const loadMusicModule = async () => {
+    if (!musicRef.current) musicRef.current = await import('@/lib/call/music')
+    return musicRef.current
+  }
+
   const isSelf = music.peerId !== null && music.peerId === selfId
   const sharerName =
     music.peerId === null ? '' : music.peerId === selfId ? 'You' : peers[music.peerId]?.name ?? 'Someone'
@@ -526,11 +536,12 @@ export function MusicPanel({ onClose }: { onClose: () => void }) {
     void handle.play().then(() => getEngine().broadcastMusicMeta())
   }
 
-  const onFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
     try {
-      const handle = createFileMusicHandle(file)
+      const m = await loadMusicModule()
+      const handle = m.createFileMusicHandle(file)
       beginShare(handle, 'file')
     } catch {
       /* file unreadable */
@@ -538,10 +549,11 @@ export function MusicPanel({ onClose }: { onClose: () => void }) {
     e.target.value = ''
   }
 
-  const startTest = () => {
+  const startTest = async () => {
     setStarting(true)
     try {
-      beginShare(createTestMusicHandle(), 'test')
+      const m = await loadMusicModule()
+      beginShare(m.createTestMusicHandle(), 'test')
     } finally {
       setStarting(false)
     }
@@ -587,7 +599,7 @@ export function MusicPanel({ onClose }: { onClose: () => void }) {
               </p>
             </div>
 
-            <input ref={fileRef} type="file" accept="audio/*" onChange={onFile} className="hidden" />
+            <input ref={fileRef} type="file" accept="audio/*" onChange={(e) => void onFile(e)} className="hidden" />
             <button onClick={() => fileRef.current?.click()} className="ios-pill h-12 w-full">
               <FileAudio className="h-4 w-4" strokeWidth={2.2} />
               Choose a music file
@@ -606,7 +618,7 @@ export function MusicPanel({ onClose }: { onClose: () => void }) {
             </p>
 
             {testMode && (
-              <button onClick={startTest} disabled={starting} className="ios-pill-soft mt-4 h-11 w-full text-[13px]">
+              <button onClick={() => void startTest()} disabled={starting} className="ios-pill-soft mt-4 h-11 w-full text-[13px]">
                 <Music2 className="h-4 w-4 text-[#7c7c82]" strokeWidth={2.2} />
                 {starting ? 'Starting…' : 'Play demo tune (test mode)'}
               </button>
@@ -736,11 +748,11 @@ export function MusicPanel({ onClose }: { onClose: () => void }) {
                   min={0}
                   max={100}
                   value={Math.round(remoteVol * 100)}
-                  onChange={(e) => {
-                    const v = Number(e.target.value) / 100
-                    setRemoteVol(v)
-                    setRemoteMusicVolume(v)
-                  }}
+                    onChange={(e) => {
+                      const v = Number(e.target.value) / 100
+                      setRemoteVol(v)
+                      void loadMusicModule().then((m) => m.setRemoteMusicVolume(v))
+                    }}
                   aria-label="Music volume"
                   className="ios-range flex-1"
                 />
@@ -871,6 +883,8 @@ export function QualityPanel({ onClose }: { onClose: () => void }) {
   const bitrate = useCallStore((s) => s.bitrateKbps)
   const overall = useCallStore((s) => s.overallLevel)
   const peers = useCallStore((s) => s.peers)
+  const lite = useCallStore((s) => s.lite)
+  const liteAuto = useCallStore((s) => s.liteAuto)
   const [pending, setPending] = useState<QualityPreset | null>(null)
 
   // Honest status: "still dialing" is not "bad network". If no media flows
@@ -919,6 +933,26 @@ export function QualityPanel({ onClose }: { onClose: () => void }) {
               {preset === opt.key && <Check className="h-4 w-4 shrink-0 text-[#30d158]" strokeWidth={2.8} />}
             </button>
           ))}
+        </div>
+
+        <div className="mt-4 overflow-hidden rounded-[18px] border border-black/[0.05]">
+          <div className="flex items-center justify-between gap-3 px-4 py-3.5">
+            <div>
+              <p className="text-[14px] font-semibold text-[#0d0d0f]">Lite mode</p>
+              <p className="mt-0.5 text-[12px] leading-relaxed text-[#7c7c82]">
+                Audio-only send, receive video only from the active speaker.
+                {liteAuto ? ' Auto-enabled for your connection.' : ''} Lowest data, lowest CPU.
+              </p>
+            </div>
+            <button
+              role="switch"
+              aria-checked={lite}
+              aria-label="Lite mode"
+              data-on={lite}
+              onClick={() => getEngine().setLiteMode(!lite)}
+              className="ios-switch shrink-0"
+            />
+          </div>
         </div>
 
         <p className="mt-4 px-1 text-[12px] leading-relaxed text-[#a9a9b0]">

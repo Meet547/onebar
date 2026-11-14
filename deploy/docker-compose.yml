@@ -6,11 +6,17 @@
 # Services
 #   app        Next.js (Pico UI)                 internal :3000
 #   signaling  socket.io relay + room-info probe internal :3003 / :3004
-#   coturn     TURN/STUN relay (NAT fallback)    host network :3478/udp+tcp, :49160-49200/udp
+#   coturn     TURN/STUN relay (NAT fallback)    host network :3478/udp+tcp,
+#                                                :443/tcp TLS (turns:, TURN_TLS_PORT),
+#                                                :49160-49200/udp
 #   caddy      automatic HTTPS gateway           :80, :443
 #
 # coturn uses host networking (the only reliable way to get real relay IPs);
 # everything else lives on the compose bridge network.
+#
+# ⚠ coturn's TLS listener (turns:) defaults to TCP 443 — the same port Caddy
+# uses. On a single-IP host set TURN_TLS_PORT=8443 (and update TURN_URLS
+# accordingly), or give coturn a second public IP and leave 443 — see DEPLOY.md.
 
 services:
   app:
@@ -28,10 +34,13 @@ services:
       - "3000"
     environment:
       # /api/ice hands these to every client. TURN runs on this host (coturn
-      # below) on 3478 UDP + TCP. (A TCP-443 fallback for extreme firewalls
-      # needs a dedicated IP — see DEPLOY.md.)
+      # below) on 3478 UDP + TCP, plus a TLS listener (turns:) on TURN_TLS_PORT
+      # — /api/ice derives the turns: entry from this port automatically.
+      # (Co-locating coturn TLS on 443 with Caddy needs a dedicated IP — see
+      # DEPLOY.md; on a single-IP box set TURN_TLS_PORT=8443 here.)
       - TURN_URLS=turn:${PICO_DOMAIN}:3478?transport=udp,turn:${PICO_DOMAIN}:3478?transport=tcp
       - TURN_SECRET=${TURN_SECRET}
+      - TURN_TLS_PORT=${TURN_TLS_PORT:-443}
       # The relay is its own supervised container here — the in-app embedded
       # relay is switched off, and the app's rewrites point at the container.
       - PICO_EMBEDDED_RELAY=0
@@ -62,7 +71,11 @@ services:
     network_mode: host
     volumes:
       - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf.template:ro
-    # Substitute the template placeholders, then run coturn on the result.
+      # Self-signed cert for the turns: listener, generated on first boot.
+      # Browsers do not validate TURN TLS certificates, so self-signed is the
+      # standard setup here (auth is the shared-secret HMAC, not the cert).
+      - coturn_certs:/etc/coturn/certs
+    # Substitute the template placeholders, mint a TLS cert if absent, run.
     entrypoint:
       - /bin/sh
       - -c
@@ -70,9 +83,16 @@ services:
         sed -e "s/{{{PICO_DOMAIN}}}/${PICO_DOMAIN}/g" \
             -e "s/{{{TURN_SECRET}}}/${TURN_SECRET}/g" \
             -e "s/{{{TURN_PUBLIC_IP}}}/${TURN_PUBLIC_IP}/g" \
+            -e "s/{{{TURN_TLS_PORT}}}/${TURN_TLS_PORT:-443}/g" \
             /etc/coturn/turnserver.conf.template > /tmp/turnserver.conf
+        if [ ! -f /etc/coturn/certs/turn.crt ] || [ ! -f /etc/coturn/certs/turn.key ]; then
+          mkdir -p /etc/coturn/certs
+          openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+            -keyout /etc/coturn/certs/turn.key -out /etc/coturn/certs/turn.crt \
+            -subj "/CN=${PICO_DOMAIN}" >/dev/null 2>&1
+        fi
         exec turnserver -c /tmp/turnserver.conf
-    # 3478/udp+tcp (TURN), 49160-49200/udp (relay range) are bound by the conf
+    # 3478/udp+tcp (TURN), TURN_TLS_PORT/tcp (turns: TLS), 49160-49200/udp are bound by the conf
 
   caddy:
     image: caddy:2
@@ -96,6 +116,7 @@ services:
 volumes:
   caddy_data:
   caddy_config:
+  coturn_certs:
 
 networks:
   pico:

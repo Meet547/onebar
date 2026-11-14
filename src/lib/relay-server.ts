@@ -501,6 +501,23 @@ function attachRelay(httpServer: ReturnType<typeof createHttpServer>): IoServer 
       if (to) socket.to(to).emit('rtc:ice', { from: socket.id, candidate: data.candidate })
     })
 
+    // ---- Receive-side video interest (tile visibility / speaker shedding) ----
+    // A client announces WHICH peers it wants video from (visible tiles,
+    // active speaker, spotlight). Senders react by pausing encodings toward
+    // peers who are not watched — sender-side CPU and mesh upload drop with
+    // zero renegotiation. Payload is a small id list, re-sanitized here.
+    socket.on('video:wish', (raw: unknown) => {
+      if (!currentRoom || !peer) return
+      if (!allow(`${socket.id}:chat`, 25, 10_000)) return
+      const data = (raw ?? {}) as Record<string, unknown>
+      const list = Array.isArray(data.targets) ? data.targets : []
+      const targets = list
+        .map((t) => safeString(t, 40))
+        .filter(Boolean)
+        .slice(0, 16)
+      socket.to(currentRoom).emit('video:wish', { from: socket.id, targets })
+    })
+
     // ---- Chat (kilobytes of text, relayed) ----
 
     socket.on('chat:message', (raw: unknown) => {

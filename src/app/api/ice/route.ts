@@ -17,6 +17,12 @@ import { ensureRelayAlive } from '@/lib/ensure-relay'
  *                                        ephemeral HMAC-SHA1 credentials that
  *                                        expire (TURN_CREDENTIAL_TTL seconds).
  *
+ * TLS TURN fallback (turns:): unless TURN_TLS_443=0, the endpoint derives an
+ * extra `turns:<host>:<TURN_TLS_PORT>?transport=tcp` entry (default port 443)
+ * from the first TURN_URLS host. That is the path that survives corporate
+ * firewalls which allow only outbound 443/TLS. coturn must serve TLS on that
+ * port — see deploy/coturn/turnserver.conf + DEPLOY.md.
+ *
  * TURN credentials are handed to the browser by design — WebRTC clients must
  * know them to use the relay. Ephemeral HMAC credentials keep a leaked value
  * useful for only a few hours and are the standard production setup.
@@ -30,6 +36,17 @@ const STUN_SERVERS: Array<{ urls: string[] }> = [
 ]
 
 const noStore = { 'Cache-Control': 'no-store' } as const
+
+/** STUN-only health warning — logged at most once a minute. */
+let lastStunWarnAt = 0
+function warnStunOnly(reason: string) {
+  if (Date.now() - lastStunWarnAt < 60_000) return
+  lastStunWarnAt = Date.now()
+  console.warn(
+    `[pico] /api/ice is STUN-only (${reason}) — strict-NAT pairs will fail to connect. ` +
+      'Set TURN_URLS + TURN_SECRET (see deploy/.env.example) and run coturn (deploy/docker-compose.yml).',
+  )
+}
 
 export async function GET() {
   // The app calls this on every join — the perfect moment to revive a relay
@@ -54,8 +71,9 @@ export async function GET() {
     .filter(Boolean)
 
   if (urls.length === 0) {
+    warnStunOnly('TURN_URLS not set')
     return NextResponse.json(
-      { iceServers: STUN_SERVERS, ttl: 3600, relay: true },
+      { iceServers: STUN_SERVERS, ttl: 3600, turn: false, warning: 'stun-only' },
       { headers: noStore },
     )
   }
@@ -72,17 +90,31 @@ export async function GET() {
 
   if (!username || !credential) {
     // Misconfigured TURN is worse than none — fail closed to STUN-only.
+    warnStunOnly('TURN credentials missing')
     return NextResponse.json(
-      { iceServers: STUN_SERVERS, ttl: 3600, relay: true },
+      { iceServers: STUN_SERVERS, ttl: 3600, turn: false, warning: 'stun-only' },
       { headers: noStore },
     )
+  }
+
+  // TLS fallback: turns:<host>:<port>?transport=tcp — TCP 443 reaches networks
+  // that drop every other outbound port. Derived from the first TURN host so
+  // operators only configure TURN_URLS once. (The WHATWG URL parser treats
+  // 'turn:' as an opaque path with no hostname, so extract the host by regex.)
+  const tlsOn = process.env.TURN_TLS_443 !== '0'
+  const tlsPort = Number(process.env.TURN_TLS_PORT ?? 443)
+  if (tlsOn) {
+    const host = urls[0].match(/^turns?:([^:@/?#]+):\d+/)?.[1]
+    if (host && tlsPort > 0 && tlsPort < 65_536) {
+      urls.push(`turns:${host}:${tlsPort}?transport=tcp`)
+    }
   }
 
   return NextResponse.json(
     {
       iceServers: [...STUN_SERVERS, { urls, username, credential }],
       ttl: 3600,
-      relay: true,
+      turn: true,
     },
     { headers: noStore },
   )

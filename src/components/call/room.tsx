@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import {
   MessageSquare,
@@ -15,13 +15,23 @@ import {
   Video,
   VideoOff,
 } from 'lucide-react'
-import { getEngine } from '@/lib/call/engine'
+import { SHED_ROOM_SIZE, getEngine } from '@/lib/call/engine'
 import { useCallStore } from '@/lib/call/store'
 import type { ChatMessage, PeerState } from '@/lib/call/types'
+import { subscribeLevel } from '@/lib/call/audio-levels'
 import { VideoTile } from './video-tile'
 import { NetworkBars } from './network-bars'
 import { ChatPanel, MusicPanel, ParticipantsPanel, QualityPanel, SecurityPanel } from './panels'
+import { DebugOverlay } from './debug-overlay'
 import { BrandMark, useSpeakingRingSoft } from './brand'
+
+/* ---- receive-side shedding constants (task 7) ---- */
+/** Loudness above which a peer counts as "speaking" (audio-levels 0..1). */
+const SPEAKER_LEVEL_THRESHOLD = 0.18
+/** A speaker stays "recently active" this long after their last burst. */
+const SPEAKER_MEMORY_MS = 2500
+/** A speaker change must hold this long before we re-wish — anti-flap. */
+const SPEAKER_COMMIT_MS = 3000
 
 /* ---------------- call timer (isolated: re-renders once per second) ---------------- */
 
@@ -127,7 +137,12 @@ function VideoGrid() {
             </div>
           )}
           {rest.map((p, i) => (
-            <div key={p.id} className="h-20 w-32 shrink-0 pico-pop" style={{ animationDelay: `${i * 40}ms` }}>
+            <div
+              key={p.id}
+              data-peer-id={p.id}
+              className="h-20 w-32 shrink-0 pico-pop"
+              style={{ animationDelay: `${i * 40}ms` }}
+            >
               <VideoTile peerId={p.id} state={p} isSelf={false} />
             </div>
           ))}
@@ -144,6 +159,7 @@ function VideoGrid() {
       {peerList.map((p, i) => (
         <div
           key={p.id}
+          data-peer-id={p.id}
           className={`pico-pop ${count === 1 ? 'mx-auto aspect-video w-full max-w-3xl' : 'aspect-video'}`}
           style={{ animationDelay: `${(i + 1) * 50}ms` }}
         >
@@ -216,7 +232,117 @@ export function Room({ roomCode, onLeave }: { roomCode: string; onLeave: () => v
   const signaling = useCallStore((s) => s.signalingConnected)
   const peerCount = useCallStore((s) => Object.keys(s.peers).length)
   const music = useCallStore((s) => s.music)
+  const lite = useCallStore((s) => s.lite)
+  const spotlight = useCallStore((s) => s.spotlight)
   const micMeterRef = useSpeakingRingSoft('self', self.micOn)
+  const debugOn = useMemo(() => new URLSearchParams(window.location.search).has('debug'), [])
+
+  /* ---- receive-side video interest (task 7) ----
+     visibleRef: remote peer ids whose tile is actually on screen
+     (IntersectionObserver on the grid). speakerRef: active speaker after a
+     commit hysteresis. Background tab, lite mode, or rooms ≥ SHED_ROOM_SIZE
+     shrink the interest set to speaker + spotlight; senders on the other
+     side pause their encoders toward peers nobody watches. */
+  const visibleRef = useRef(new Set<string>())
+  const speakerRef = useRef<string | null>(null)
+  const [speaker, setSpeaker] = useState<string | null>(null)
+
+  const recomputeInterest = useCallback(() => {
+    const s = useCallStore.getState()
+    const ids = Object.keys(s.peers)
+    const bg = document.visibilityState === 'hidden'
+    const size = ids.length + 1
+    const wanted =
+      bg || s.lite || size >= SHED_ROOM_SIZE
+        ? ids.filter((id) => id === speakerRef.current || id === s.spotlight)
+        : ids.filter((id) => visibleRef.current.has(id))
+    getEngine().setVideoInterest(wanted)
+  }, [])
+
+  // Active speaker: audio-levels ticks update a Map (no React), one commit
+  // pass per second with a SPEAKER_COMMIT_MS hold — a passing cough never
+  // re-wishes the room.
+  useEffect(() => {
+    const lastLoud = new Map<string, number>()
+    let candidate: string | null = null
+    let candidateSince = 0
+    const commit = window.setInterval(() => {
+      const now = Date.now()
+      let best: string | null = null
+      let bestTs = 0
+      for (const [id, ts] of lastLoud) {
+        if (now - ts > SPEAKER_MEMORY_MS) {
+          lastLoud.delete(id)
+          continue
+        }
+        if (ts > bestTs) {
+          bestTs = ts
+          best = id
+        }
+      }
+      if (best !== candidate) {
+        candidate = best
+        candidateSince = now
+      }
+      if (now - candidateSince < SPEAKER_COMMIT_MS) return
+      if (candidate !== speakerRef.current) {
+        speakerRef.current = candidate
+        setSpeaker(candidate)
+      }
+    }, 1000)
+    const ids = Object.keys(useCallStore.getState().peers)
+    const subs = ids.map((id) =>
+      subscribeLevel(id, (level) => {
+        if (level > SPEAKER_LEVEL_THRESHOLD) lastLoud.set(id, Date.now())
+      }),
+    )
+    return () => {
+      window.clearInterval(commit)
+      subs.forEach((u) => u())
+    }
+  }, [peerCount])
+
+  // Tile visibility: observe the grid wrappers; new peers start optimistic
+  // (visible) until the observer reports otherwise.
+  useEffect(() => {
+    const io = new IntersectionObserver(
+      (entries) => {
+        let changed = false
+        for (const e of entries) {
+          const id = (e.target as HTMLElement).dataset.peerId
+          if (!id || id === 'self') continue
+          if (e.isIntersecting && !visibleRef.current.has(id)) {
+            visibleRef.current.add(id)
+            changed = true
+          } else if (!e.isIntersecting && visibleRef.current.has(id)) {
+            visibleRef.current.delete(id)
+            changed = true
+          }
+        }
+        if (changed) recomputeInterest()
+      },
+      { threshold: 0.2 },
+    )
+    visibleRef.current = new Set(Object.keys(useCallStore.getState().peers))
+    document.querySelectorAll<HTMLElement>('[data-peer-id]').forEach((n) => {
+      const id = n.dataset.peerId
+      if (id && id !== 'self') io.observe(n)
+    })
+    recomputeInterest()
+    return () => io.disconnect()
+  }, [peerCount, recomputeInterest])
+
+  // Background tab: shed everything but speaker/spotlight, restore on return.
+  useEffect(() => {
+    const onVis = () => recomputeInterest()
+    document.addEventListener('visibilitychange', onVis)
+    return () => document.removeEventListener('visibilitychange', onVis)
+  }, [recomputeInterest])
+
+  // Any interest input change re-wishes (lite toggle, spotlight, speaker).
+  useEffect(() => {
+    recomputeInterest()
+  }, [speaker, spotlight, lite, recomputeInterest])
 
   // opening the chat clears the unread badge
   useEffect(() => {
@@ -384,6 +510,7 @@ export function Room({ roomCode, onLeave }: { roomCode: string; onLeave: () => v
       {panel === 'quality' && <QualityPanel onClose={() => setPanel(null)} />}
       {panel === 'music' && <MusicPanel onClose={() => setPanel(null)} />}
       {panel === 'security' && <SecurityPanel onClose={() => setPanel(null)} />}
+      {debugOn && <DebugOverlay />}
     </div>
   )
 }

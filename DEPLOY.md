@@ -51,7 +51,7 @@ and nothing static is exposed.
 | A VPS | 1 vCPU / 1 GB RAM is genuinely enough for dozens of concurrent rooms (signaling is tiny; media doesn't flow through it) |
 | A domain | `call.example.com` → the VPS IP (A/AAAA record) |
 | Docker + compose plugin | `docker` and `docker compose` |
-| Open firewall ports | `80/tcp`, `443/tcp` (Caddy), `3478/udp+tcp` (TURN), `49160–49200/udp` (TURN relay range) |
+| Open firewall ports | `80/tcp`, `443/tcp` (Caddy), `3478/udp+tcp` (TURN), `443/tcp` on the coturn IP (TURN TLS — see below), `49160–49200/udp` (TURN relay range) |
 
 ---
 
@@ -167,12 +167,27 @@ relays like Cloudflare Calls TURN, Twilio NTS or Xirsys work out of the box:
    plus `TURN_USERNAME` / `TURN_CREDENTIAL` on the **app** service.
 3. Remove the `coturn` service from `docker compose`.
 
-## TCP-443 TURN fallback (extreme firewalls)
+## TURN over TLS (turns:) — firewalled networks
 
-Some networks only allow TCP 443. That port is taken by Caddy on this host,
-so the clean pattern is a second IP (or a second small VPS) running coturn on
-TCP 443, added to `TURN_URLS`. Most deployments skip this — UDP 3478 + TCP
-3478 already covers the overwhelming majority.
+Some networks allow only outbound TCP 443. `/api/ice` therefore advertises a
+`turns:<domain>:<TURN_TLS_PORT>?transport=tcp` entry automatically — derived
+from `TURN_URLS`'s host, no extra config. coturn serves it from the compose
+stack: the entrypoint mints a self-signed cert on first boot (persisted in the
+`coturn_certs` volume) and listens on `tls-listening-port`. Browsers do not
+validate TURN TLS certificates — authentication is the shared-secret HMAC —
+so self-signed is the standard, correct setup here.
+
+Port placement (coturn uses host networking, so this is a real socket):
+
+| Setup | `TURN_TLS_PORT` | Notes |
+| --- | --- | --- |
+| coturn on a second public IP (recommended) | `443` | best reachability; update firewall: open `<port>/tcp` |
+| coturn + Caddy share one IP | `8443` | Caddy keeps 443; set `TURN_TLS_PORT=8443` in `.env` |
+
+Set `TURN_TLS_443=0` to stop advertising the `turns:` entry entirely.
+The app logs a boot warning (and `/api/ice` warns + returns
+`"warning":"stun-only"`) whenever TURN is not configured — treat it as a
+health-check signal in your monitor.
 
 ## Operations
 
