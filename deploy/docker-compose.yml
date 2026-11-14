@@ -7,16 +7,19 @@
 #   app        Next.js (Pico UI)                 internal :3000
 #   signaling  socket.io relay + room-info probe internal :3003 / :3004
 #   coturn     TURN/STUN relay (NAT fallback)    host network :3478/udp+tcp,
-#                                                :443/tcp TLS (turns:, TURN_TLS_PORT),
+#                                                :8443/tcp TLS (turns:, TURN_TLS_PORT),
 #                                                :49160-49200/udp
 #   caddy      automatic HTTPS gateway           :80, :443
 #
 # coturn uses host networking (the only reliable way to get real relay IPs);
 # everything else lives on the compose bridge network.
 #
-# ⚠ coturn's TLS listener (turns:) defaults to TCP 443 — the same port Caddy
-# uses. On a single-IP host set TURN_TLS_PORT=8443 (and update TURN_URLS
-# accordingly), or give coturn a second public IP and leave 443 — see DEPLOY.md.
+# TCP 443 is Caddy's. coturn's TLS listener therefore defaults to 8443 on a
+# single-IP host — still enough for most restrictive networks. True
+# turns:…:443 requires a dedicated IP for coturn (recommended) or SNI
+# multiplexing via Caddy's layer4 module — both documented in DEPLOY.md.
+# The turns: certificate must be REAL (browsers validate TURN TLS certs);
+# the coturn entrypoint reuses the Let's Encrypt cert from Caddy's storage.
 
 services:
   app:
@@ -36,11 +39,11 @@ services:
       # /api/ice hands these to every client. TURN runs on this host (coturn
       # below) on 3478 UDP + TCP, plus a TLS listener (turns:) on TURN_TLS_PORT
       # — /api/ice derives the turns: entry from this port automatically.
-      # (Co-locating coturn TLS on 443 with Caddy needs a dedicated IP — see
-      # DEPLOY.md; on a single-IP box set TURN_TLS_PORT=8443 here.)
+      # (Co-locating coturn TLS on 443 with Caddy needs a dedicated IP or SNI
+      # multiplexing — see DEPLOY.md; the single-IP default is 8443.)
       - TURN_URLS=turn:${PICO_DOMAIN}:3478?transport=udp,turn:${PICO_DOMAIN}:3478?transport=tcp
       - TURN_SECRET=${TURN_SECRET}
-      - TURN_TLS_PORT=${TURN_TLS_PORT:-443}
+      - TURN_TLS_PORT=${TURN_TLS_PORT:-8443}
       # The relay is its own supervised container here — the in-app embedded
       # relay is switched off, and the app's rewrites point at the container.
       - PICO_EMBEDDED_RELAY=0
@@ -71,26 +74,45 @@ services:
     network_mode: host
     volumes:
       - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf.template:ro
-      # Self-signed cert for the turns: listener, generated on first boot.
-      # Browsers do not validate TURN TLS certificates, so self-signed is the
-      # standard setup here (auth is the shared-secret HMAC, not the cert).
+      # The turns: listener needs a REAL certificate — browsers validate TURN
+      # TLS certificates and reject self-signed ones. Caddy already obtains a
+      # Let's Encrypt cert for the domain; sharing its data volume lets coturn
+      # serve exactly that cert (read-only).
+      - caddy_data:/etc/coturn/acme:ro
+      # Fallback store for the (discouraged) self-signed mint.
       - coturn_certs:/etc/coturn/certs
-    # Substitute the template placeholders, mint a TLS cert if absent, run.
+    # Substitute the template placeholders, locate the real ACME cert, run.
+    # Fresh deploys: Caddy has no cert yet on the very first boot, so coturn
+    # starts with a loud warning + self-signed fallback — restart it after
+    # Caddy's first issuance: `docker compose restart coturn`.
     entrypoint:
       - /bin/sh
       - -c
       - |
+        CRT=$(find /etc/coturn/acme -type f -name "${PICO_DOMAIN}.crt" 2>/dev/null | head -n1)
+        KEY=$(find /etc/coturn/acme -type f -name "${PICO_DOMAIN}.key" 2>/dev/null | head -n1)
+        if [ -n "$CRT" ] && [ -n "$KEY" ]; then
+          echo "[coturn] turns: serving the ACME certificate Caddy obtained for ${PICO_DOMAIN}"
+        elif [ -n "${TURN_CERT_FILE:-}" ] && [ -n "${TURN_KEY_FILE:-}" ] && [ -f "${TURN_CERT_FILE}" ] && [ -f "${TURN_KEY_FILE}" ]; then
+          CRT="${TURN_CERT_FILE}"; KEY="${TURN_KEY_FILE}"
+          echo "[coturn] turns: serving TURN_CERT_FILE / TURN_KEY_FILE"
+        else
+          echo "[coturn] WARNING: no real certificate for turns:. Browsers VALIDATE TURN TLS certificates — self-signed gets rejected and the strict-firewall fallback will fail. Fix: start Caddy first (it obtains the LE cert), then 'docker compose restart coturn'; or mount TURN_CERT_FILE / TURN_KEY_FILE. See DEPLOY.md."
+          mkdir -p /etc/coturn/certs
+          [ -f /etc/coturn/certs/turn.crt ] && [ -f /etc/coturn/certs/turn.key ] || \
+            openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+              -keyout /etc/coturn/certs/turn.key -out /etc/coturn/certs/turn.crt \
+              -subj "/CN=${PICO_DOMAIN}" >/dev/null 2>&1
+          CRT=/etc/coturn/certs/turn.crt
+          KEY=/etc/coturn/certs/turn.key
+        fi
         sed -e "s/{{{PICO_DOMAIN}}}/${PICO_DOMAIN}/g" \
             -e "s/{{{TURN_SECRET}}}/${TURN_SECRET}/g" \
             -e "s/{{{TURN_PUBLIC_IP}}}/${TURN_PUBLIC_IP}/g" \
-            -e "s/{{{TURN_TLS_PORT}}}/${TURN_TLS_PORT:-443}/g" \
+            -e "s/{{{TURN_TLS_PORT}}}/${TURN_TLS_PORT:-8443}/g" \
+            -e "s|{{{TURN_CERT}}}|$CRT|g" \
+            -e "s|{{{TURN_KEY}}}|$KEY|g" \
             /etc/coturn/turnserver.conf.template > /tmp/turnserver.conf
-        if [ ! -f /etc/coturn/certs/turn.crt ] || [ ! -f /etc/coturn/certs/turn.key ]; then
-          mkdir -p /etc/coturn/certs
-          openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-            -keyout /etc/coturn/certs/turn.key -out /etc/coturn/certs/turn.crt \
-            -subj "/CN=${PICO_DOMAIN}" >/dev/null 2>&1
-        fi
         exec turnserver -c /tmp/turnserver.conf
     # 3478/udp+tcp (TURN), TURN_TLS_PORT/tcp (turns: TLS), 49160-49200/udp are bound by the conf
 

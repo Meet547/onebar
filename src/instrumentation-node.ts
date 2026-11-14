@@ -19,7 +19,7 @@ export async function registerNode() {
             'Set TURN_URLS + TURN_SECRET (deploy/.env.example) and run coturn (deploy/docker-compose.yml).',
         )
       } else if (process.env.TURN_TLS_443 !== '0') {
-        const tlsPort = process.env.TURN_TLS_PORT ?? '443'
+        const tlsPort = process.env.TURN_TLS_PORT ?? '8443'
         console.log(`[pico] TURN enabled incl. turns: TCP ${tlsPort} (TLS fallback)`)
       }
 

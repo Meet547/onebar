@@ -97,12 +97,14 @@ export async function GET() {
     )
   }
 
-  // TLS fallback: turns:<host>:<port>?transport=tcp — TCP 443 reaches networks
-  // that drop every other outbound port. Derived from the first TURN host so
-  // operators only configure TURN_URLS once. (The WHATWG URL parser treats
-  // 'turn:' as an opaque path with no hostname, so extract the host by regex.)
+  // TLS fallback: turns:<host>:<port>?transport=tcp — TLS on a TCP port
+  // reaches networks that drop everything else. Derived from the first TURN
+  // host so operators only configure TURN_URLS once. Default port follows the
+  // compose stack (8443 — TCP 443 belongs to Caddy on a single-IP host; see
+  // DEPLOY.md). The WHATWG URL parser treats 'turn:' as an opaque path with
+  // no hostname, so extract the host by regex.
   const tlsOn = process.env.TURN_TLS_443 !== '0'
-  const tlsPort = Number(process.env.TURN_TLS_PORT ?? 443)
+  const tlsPort = Number(process.env.TURN_TLS_PORT ?? 8443)
   if (tlsOn) {
     const host = urls[0].match(/^turns?:([^:@/?#]+):\d+/)?.[1]
     if (host && tlsPort > 0 && tlsPort < 65_536) {

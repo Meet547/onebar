@@ -51,7 +51,7 @@ and nothing static is exposed.
 | A VPS | 1 vCPU / 1 GB RAM is genuinely enough for dozens of concurrent rooms (signaling is tiny; media doesn't flow through it) |
 | A domain | `call.example.com` → the VPS IP (A/AAAA record) |
 | Docker + compose plugin | `docker` and `docker compose` |
-| Open firewall ports | `80/tcp`, `443/tcp` (Caddy), `3478/udp+tcp` (TURN), `443/tcp` on the coturn IP (TURN TLS — see below), `49160–49200/udp` (TURN relay range) |
+| Open firewall ports | `80/tcp`, `443/tcp` (Caddy), `3478/udp+tcp` (TURN), `8443/tcp` on the coturn IP (TURN TLS default — see below), `49160–49200/udp` (TURN relay range) |
 
 ---
 
@@ -169,21 +169,50 @@ relays like Cloudflare Calls TURN, Twilio NTS or Xirsys work out of the box:
 
 ## TURN over TLS (turns:) — firewalled networks
 
-Some networks allow only outbound TCP 443. `/api/ice` therefore advertises a
-`turns:<domain>:<TURN_TLS_PORT>?transport=tcp` entry automatically — derived
-from `TURN_URLS`'s host, no extra config. coturn serves it from the compose
-stack: the entrypoint mints a self-signed cert on first boot (persisted in the
-`coturn_certs` volume) and listens on `tls-listening-port`. Browsers do not
-validate TURN TLS certificates — authentication is the shared-secret HMAC —
-so self-signed is the standard, correct setup here.
+Some networks allow only outbound TCP 443 (or a bare TLS whitelist).
+`/api/ice` therefore advertises a `turns:<domain>:<TURN_TLS_PORT>?transport=tcp`
+entry automatically — derived from `TURN_URLS`'s host, no extra config.
+
+**The certificate must be real.** Browsers validate TURN TLS certificates and
+reject self-signed ones, which would make this fallback path useless exactly
+where it is needed. The compose stack handles it: coturn mounts Caddy's data
+volume read-only and serves the very Let's Encrypt certificate Caddy already
+obtained for the domain. On a fresh deploy, Caddy has no cert during the first
+seconds — coturn then starts with a loud warning and a (rejected-by-browsers)
+self-signed placeholder; run `docker compose restart coturn` once Caddy has
+issued, or wire `TURN_CERT_FILE` / `TURN_KEY_FILE` to a certbot-provided pair.
 
 Port placement (coturn uses host networking, so this is a real socket):
 
 | Setup | `TURN_TLS_PORT` | Notes |
 | --- | --- | --- |
-| coturn on a second public IP (recommended) | `443` | best reachability; update firewall: open `<port>/tcp` |
-| coturn + Caddy share one IP | `8443` | Caddy keeps 443; set `TURN_TLS_PORT=8443` in `.env` |
+| **Default (single IP)** | `8443` | no conflict with Caddy; passes most restrictive networks |
+| coturn on a dedicated second IP (best) | `443` | best reachability; open `443/tcp` on that IP's firewall |
+| SNI multiplex on one IP | `443` | needs a Caddy build with `caddyserver/layer4`; see below |
 
+SNI multiplexing (single IP, true 443 for both web and TURN): build Caddy
+with the layer4 module (`xcaddy build --with github.com/caddyserver/layer4`)
+and replace the plain HTTPS server with a TLS-passthrough sniffer that routes
+by SNI — TURN's ClientHello (domain SNI) goes to coturn on its own port,
+everything else to Caddy's HTTPS:
+
+```caddyfile
+:443 {
+    layer4 {
+        :443 {
+            tls sni turn.example.com
+            route {
+                route turn    # -> tcp 127.0.0.1:8443 (coturn, keep TLS inside)
+            }
+            route {
+                route web     # -> the ordinary https server below
+            }
+        }
+    }
+}
+```
+
+This is an optional pattern — the default 8443 setup needs none of it.
 Set `TURN_TLS_443=0` to stop advertising the `turns:` entry entirely.
 The app logs a boot warning (and `/api/ice` warns + returns
 `"warning":"stun-only"`) whenever TURN is not configured — treat it as a

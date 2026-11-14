@@ -87,36 +87,24 @@ const AUDIO_SENDER_BITRATE = 24_000
  *  for the 50 kbps video floor. */
 const AUDIO_SENDER_BITRATE_WEAK = 16_000
 const STATS_INTERVAL_MS = 3000
-
-/* ---- adaptation constants (smoothed signals + hysteresis everywhere) ---- */
-/** Transport signals are averaged over the last N polls — the anti-flap window. */
-const SMOOTH_WINDOW = 3
-/** availableOutgoingBitrate (bps) → level thresholds. PRIMARY signal; the
- *  smoothed loss/RTT pairs can only ever WORSEN the verdict, never upgrade it. */
-const BWE_LEVEL0_BPS = 120_000 // below → level 0 (50 kbps video floor + 16 kbps audio)
-const BWE_LEVEL1_BPS = 280_000 // below → level 1 (110 kbps cap)
-const BWE_LEVEL2_BPS = 600_000 // below → level 2 (profile default)
-/** Mesh upload budget = 0.8 × the weakest smoothed BWE (leave headroom for
- *  ICE/RTCP retransmits and the signaling socket). */
-const UPLOAD_BUDGET_SHARE = 0.8
-/** Per-peer video floor when the shared budget runs dry (bps). */
-const BUDGET_VIDEO_FLOOR = 25_000
-/** A weak peer's sender scales resolution down below these budgets:
- *  <80 kbps → ÷4, <150 kbps → ÷2 (capture stays shared, only THEIR stream
- *  shrinks — one bad link never degrades the picture everyone else gets). */
-const BUDGET_SCALE4_BPS = 80_000
-const BUDGET_SCALE2_BPS = 150_000
-/** Sender params are rewritten only on a >10% budget change or scale change. */
-const BUDGET_REWRITE_FACTOR = 0.1
-/** CPU ladder: one step per 2 consecutive 'cpu'-limited polls; one step back
- *  per 10 consecutive clean polls. */
-const CPU_STEP_POLLS = 2
-const CPU_RECOVER_POLLS = 10
-/** Capture fps ceiling once the CPU ladder reaches step 2. */
-const CPU_FPS_CAP = 12
 /** Receive-side shedding kicks in from this room size on (speaker+spotlight). */
 export const SHED_ROOM_SIZE = 5
 const LITE_STORAGE_KEY = 'pico-lite'
+// All adaptation constants and the pure decision logic (classification,
+// budget split, CPU ladder) live in ./adaptive — unit-tested offline.
+import {
+  APP_LIMITED_FACTOR,
+  BWE_WARMUP_POLLS,
+  CPU_FPS_CAP,
+  PROBE_EVERY_POLLS,
+  avgSmooth,
+  budgetChanged,
+  classifyLink,
+  cpuLadderTick,
+  pushSmooth,
+  splitBudget,
+  type CpuLadderState,
+} from './adaptive'
 
 export type MediaMode = 'full' | 'audio' | 'none'
 
@@ -150,6 +138,8 @@ interface LinkInfo {
   lastBudget: number
   lastScale: number
   lastAudioCap: number
+  /** Poll tick of the last probe-up poll (budget lifted so BWE can recover). */
+  lastProbeTick: number
   /** Nominated pair's candidate types (host/srflx/prflx/relay), debug only. */
   candType: string
 }
@@ -239,65 +229,29 @@ function mungeOpus(sdp: string, musicIds: Set<string>, musicMids: Set<string>): 
   return out.join('\r\n')
 }
 
-/** Rolling average over a SMOOTH_WINDOW-sized history. */
-function push3(hist: number[], v: number) {
-  hist.push(v)
-  if (hist.length > SMOOTH_WINDOW) hist.shift()
-}
-
-function avg3(hist: number[] | undefined): number | null {
-  if (!hist || hist.length === 0) return null
-  let s = 0
-  for (const v of hist) s += v
-  return s / hist.length
-}
-
-/**
- * Link classification (task 3): the smoothed transport bandwidth estimate is
- * the PRIMARY signal; smoothed loss/RTT are SECONDARY triggers that can only
- * worsen the verdict. With no BWE at all (browser never reported it) we fall
- * back to the loss/RTT pairs alone, with the same pessimistic defaults as
- * before for links with no data yet.
- */
-function classifyLink(rttAvg: number | null, lossAvg: number | null, bweAvg: number | null): NetworkLevel {
-  const rtt = rttAvg ?? 0.4
-  const loss = lossAvg ?? 0.05
-  if (bweAvg !== null) {
-    let level: NetworkLevel =
-      bweAvg < BWE_LEVEL0_BPS ? 0 : bweAvg < BWE_LEVEL1_BPS ? 1 : bweAvg < BWE_LEVEL2_BPS ? 2 : 3
-    if (rtt > 0.5 || loss > 0.08) level = Math.min(level, 0) as NetworkLevel
-    else if (rtt > 0.3 || loss > 0.05) level = Math.min(level, 1) as NetworkLevel
-    else if (rtt > 0.15 || loss > 0.02) level = Math.min(level, 2) as NetworkLevel
-    return level
-  }
-  if (rtt > 0.5 || loss > 0.08) return 0
-  if (rtt > 0.3 || loss > 0.05) return 1
-  if (rtt > 0.15 || loss > 0.02) return 2
-  return 3
-}
+/** Rolling-average helpers and the classifier live in ./adaptive (unit-tested). */
 
 /**
  * Codec ordering via setCodecPreferences (task 6), chosen once per video
  * transceiver:
- *  - Low-end device (≤4 logical cores or deviceMemory ≤ 4): H.264 first —
- *    it is the one usually backed by a hardware encoder/decoder — then VP8.
- *  - Everyone else: VP8 first (cheapest encode), VP9 second (better per-bit
- *    quality at low bitrates when the browser picks it).
+ *  - H.264 is preferred ONLY when the browser reports a power-efficient
+ *    (i.e. hardware) H.264 encoder — software H.264 is no lighter than VP8
+ *    and burns the same CPU for nothing (see detectCodecPreference).
+ *  - Default everywhere else: VP8 first (cheapest encode), VP9 second
+ *    (better per-bit quality when the browser picks it).
  *  - AV1 is NEVER preferred — its software encode burns CPU the weak devices
  *    don't have; it is demoted to last, not removed (never re-offer a codec
  *    list the other side may have already selected).
  * Falls back silently to browser defaults when the API or codec list is
  * unavailable — a missing preference must never break negotiation.
  */
-function applyVideoCodecPreference(transceiver: RTCRtpTransceiver) {
+function applyVideoCodecPreference(transceiver: RTCRtpTransceiver, pref: 'h264' | 'vp8') {
   if (typeof transceiver.setCodecPreferences !== 'function') return
   const caps = RTCRtpSender.getCapabilities?.('video')?.codecs
   if (!caps || caps.length === 0) return
-  const nav = navigator as Navigator & { deviceMemory?: number }
-  const lowEnd = (navigator.hardwareConcurrency ?? 8) <= 4 || (nav.deviceMemory ?? 8) <= 4
   const rank = (mime: string): number => {
     const m = mime.toLowerCase()
-    if (lowEnd) {
+    if (pref === 'h264') {
       if (m === 'video/h264') return 0
       if (m === 'video/vp8') return 1
       if (m === 'video/vp9') return 2
@@ -370,16 +324,23 @@ export class CallEngine {
   /* ---- adaptation state (tasks 2-5, 7, debug overlay) ---- */
   /** Last encode-time sample per peer — delta vs this gives ms/frame. */
   private prevEncode = new Map<string, { t: number; f: number }>()
-  /** CPU ladder: 0 ok → 1 resolution down → 2 +fps cap → 3 audio-only send. */
-  private cpuStep = 0
-  private cpuBadTicks = 0
-  private cpuCleanTicks = 0
+  /** Stats-poll counter since join — drives BWE warmup and probe-up cadence. */
+  private pollTick = 0
+  /** CPU ladder state (pure logic in ./adaptive): 0 ok → 1 resolution down
+   *  → 2 +fps cap → 3 audio-only send. */
+  private cpu: CpuLadderState = { step: 0, badTicks: 0, cleanTicks: 0 }
   private cpuVideoPaused = false
   /** Receive-side interest: each remote peer's wish-set for MY video. */
   private wishBy = new Map<string, Set<string>>()
   private lastWish = ''
   /** Debug overlay (?debug=1) — written by pollStats every 3 s. */
   private debugEnabled = false
+  /** Codec order decision ('h264' only with a power-efficient encoder). */
+  private codecPref: 'h264' | 'vp8' = 'vp8'
+  private codecPrefPromise: Promise<'h264' | 'vp8'> | null = null
+  /** Network-change watchers (online / connection change → restartIce). */
+  private unbindNetwork: (() => void) | null = null
+  private lastNetworkKick = 0
 
   /* ---- listen together (lazy module — task 11) ---- */
   private musicMod: Promise<typeof import('./music')> | null = null
@@ -584,6 +545,13 @@ export class CallEngine {
     // Lite mode default (task 8): stored manual choice wins; otherwise a
     // data-saver browser or 2G/3G link auto-enables it for this session.
     this.maybeAutoLite()
+
+    // Network-change recovery (Wi-Fi↔LTE hops, captive portals): re-punch
+    // every live connection the moment connectivity changes.
+    this.bindNetworkWatchers()
+
+    // Codec preference probe: H.264 only when the encoder is power-efficient.
+    void this.ensureCodecPref()
 
     // ---- Events ----
     // Debug overlay (?debug=1) — pollStats writes a snapshot every 3 s only
@@ -857,6 +825,7 @@ export class CallEngine {
       lastBudget: 0,
       lastScale: 1,
       lastAudioCap: 0,
+      lastProbeTick: 0,
       candType: '?',
     })
     this.makingOffer.set(peerId, false)
@@ -893,16 +862,30 @@ export class CallEngine {
     this.sendersMap.set(peerId, senders)
     this.applySenderPriorities(senders)
 
-    // Codec order (task 6): hardware/CPU-aware, AV1 demoted. One shot per
-    // transceiver; silently skipped on browsers without the API.
+    // Codec order (task 6, corrected): H.264 only with a power-efficient
+    // encoder, AV1 demoted. Applied now with the current best guess, and
+    // re-applied across all transceivers once the async capability probe
+    // lands (preference-only change — negotiation handles it).
     try {
       const vt = pc
         .getTransceivers()
         .find((t) => t.sender.track?.kind === 'video' || t.receiver.track.kind === 'video')
-      if (vt) applyVideoCodecPreference(vt)
+      if (vt) applyVideoCodecPreference(vt, this.codecPref)
     } catch {
       /* ignore */
     }
+    void this.ensureCodecPref().then(() => {
+      for (const p of this.pcs.values()) {
+        try {
+          const vt = p
+            .getTransceivers()
+            .find((t) => t.sender.track?.kind === 'video' || t.receiver.track.kind === 'video')
+          if (vt) applyVideoCodecPreference(vt, this.codecPref)
+        } catch {
+          /* ignore */
+        }
+      }
+    })
 
     // Reserve the music m-line when this peer is the active listen-together
     // sharer: that PC's layout is [audio, video, music], and a connection
@@ -1329,10 +1312,11 @@ export class CallEngine {
     this.prevEncode.clear()
     this.wishBy.clear()
     this.lastWish = ''
-    this.cpuStep = 0
-    this.cpuBadTicks = 0
-    this.cpuCleanTicks = 0
+    this.pollTick = 0
+    this.cpu = { step: 0, badTicks: 0, cleanTicks: 0 }
     this.cpuVideoPaused = false
+    this.unbindNetwork?.()
+    this.unbindNetwork = null
     clearAllAudio()
     putStream('self', null)
     this.localStream = null
@@ -1624,7 +1608,12 @@ export class CallEngine {
     this.syncOutgoingVideo()
   }
 
-  /** Auto-enable lite on data-saver browsers / 2G-3G unless the user chose. */
+  /**
+   * Connection-hint defaults (corrected): Lite only for genuinely hostile
+   * links (saveData, slow-2g, 2g). "3g" reports for many connections that
+   * are perfectly usable — for those, drop to the saver preset and suggest
+   * Lite instead of forcing audio-only. A stored manual choice always wins.
+   */
   maybeAutoLite() {
     let saved: string | null = null
     try {
@@ -1639,9 +1628,81 @@ export class CallEngine {
     const conn = (
       navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }
     ).connection
-    if (conn?.saveData || ['slow-2g', '2g', '3g'].includes(conn?.effectiveType ?? '')) {
+    const et = conn?.effectiveType ?? '4g'
+    if (conn?.saveData || et === 'slow-2g' || et === '2g') {
       this.setLiteMode(true, { auto: true })
-      toast('Lite mode on — slow connection detected', { duration: 2600 })
+      toast('Lite mode on — very slow connection detected', { duration: 2600 })
+    } else if (et === '3g') {
+      void this.setPreset('saver')
+      toast('Slow connection — video set to Data Saver. Lite mode lives in Quality settings if it stays rough.', {
+        duration: 4200,
+      })
+    }
+  }
+
+  /**
+   * Codec preference detection (task 6, corrected): H.264 is preferred only
+   * when the browser reports its H.264 ENCODER as power-efficient — that is
+   * the hardware path. Software H.264 is no lighter than VP8, so without
+   * that signal we stay on VP8 regardless of core count.
+   */
+  private async detectCodecPreference(): Promise<'h264' | 'vp8'> {
+    try {
+      const res = await navigator.mediaCapabilities.encodingInfo({
+        type: 'webrtc',
+        video: {
+          contentType: 'video/h264; codecs=avc1.42E01E',
+          width: 640,
+          height: 480,
+          bitrate: 300_000,
+          framerate: 24,
+        },
+      })
+      if (res.powerEfficient === true) return 'h264'
+    } catch {
+      /* no mediaCapabilities — VP8 default */
+    }
+    return 'vp8'
+  }
+
+  private ensureCodecPref(): Promise<'h264' | 'vp8'> {
+    if (!this.codecPrefPromise) {
+      this.codecPrefPromise = this.detectCodecPreference().catch(() => 'vp8' as const)
+    }
+    return this.codecPrefPromise
+  }
+
+  /**
+   * Network-change recovery: Wi-Fi↔LTE hops and captive-portal re-auths kill
+   * the selected candidate pair while the DTLS association still looks fine —
+   * the classic "one bar and frozen" state. The moment the OS reports a
+   * network change (or connectivity returns), re-punch every live connection.
+   * Debounced 3 s: one hop fires several connection-change events.
+   */
+  private bindNetworkWatchers() {
+    const kick = () => {
+      const now = Date.now()
+      if (now - this.lastNetworkKick < 3000) return
+      this.lastNetworkKick = now
+      for (const pc of this.pcs.values()) {
+        if (pc.connectionState === 'connected' || pc.connectionState === 'disconnected') {
+          try {
+            pc.restartIce()
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+      for (const link of this.links.values()) {
+        link.silentTicks = 0
+      }
+    }
+    const conn = (navigator as Navigator & { connection?: EventTarget }).connection
+    window.addEventListener('online', kick)
+    conn?.addEventListener?.('change', kick)
+    this.unbindNetwork = () => {
+      window.removeEventListener('online', kick)
+      conn?.removeEventListener?.('change', kick)
     }
   }
 
@@ -1735,7 +1796,7 @@ export class CallEngine {
   private currentKey(): Exclude<QualityPreset, 'auto'> {
     const preset = useCallStore.getState().preset
     const base = preset === 'auto' ? this.adaptiveProfile : preset
-    if (this.cpuStep >= 1) {
+    if (this.cpu.step >= 1) {
       const order: Array<Exclude<QualityPreset, 'auto'>> = ['saver', 'balanced', 'sharp']
       return order[Math.max(0, order.indexOf(base) - 1)]
     }
@@ -1800,6 +1861,7 @@ export class CallEngine {
 
   private async pollStats() {
     if (this.pcs.size === 0) return
+    this.pollTick++
 
     // Signaling watchdog: an offer left hanging for 9s+ (a rare race between
     // simultaneous reconnects) self-heals with a fresh offer.
@@ -1824,7 +1886,14 @@ export class CallEngine {
     /** Per connected link, resolved after the loop by the budget allocator. */
     const sampled = new Map<
       string,
-      { level: NetworkLevel; bytesDelta: number; inboundDelta: number; screenLive: boolean }
+      {
+        level: NetworkLevel
+        bytesDelta: number
+        inboundDelta: number
+        screenLive: boolean
+        /** True when the estimate merely echoes our own cap (see pollStats). */
+        appLimited: boolean
+      }
     >()
     const debugPeers: DebugPeerInfo[] = []
     let worstReason = 'none'
@@ -1832,6 +1901,8 @@ export class CallEngine {
     /** Weakest smoothed outgoing BWE across connected links — the shared
      *  uplink bottleneck approximation (task 4). */
     let weakestBwe: number | null = null
+    /** This peer's budget share, for the debug overlay. */
+    let debugShare = 0
 
     for (const [peerId, pc] of this.pcs) {
       const link = this.links.get(peerId)
@@ -1951,19 +2022,42 @@ export class CallEngine {
       // Smooth the transport signals over the last SMOOTH_WINDOW polls —
       // the hysteresis that keeps caps, bars and budgets from flapping on
       // one bad sample (task 3).
+      const bweSmooth = avgSmooth(link?.bweHist)
       if (link) {
-        if (bwe !== null) push3(link.bweHist, bwe)
-        if (loss !== null) push3(link.lossHist, loss)
-        if (rtt !== null) push3(link.rttHist, rtt)
+        if (bwe !== null) pushSmooth(link.bweHist, bwe)
+        if (loss !== null) pushSmooth(link.lossHist, loss)
+        if (rtt !== null) pushSmooth(link.rttHist, rtt)
       }
-      const level = classifyLink(avg3(link?.rttHist), avg3(link?.lossHist), avg3(link?.bweHist))
+
+      /* Anti-lock-low guards (corrected task 3): availableOutgoingBitrate
+         starts near zero and only grows when the sender is allowed to probe.
+         Trusting it too early — or while our own cap binds the sender — locks
+         quality at the floor forever. Ignore the BWE (classify on loss/RTT
+         only, verdict capped at the fallback) when:
+         - warmup: the first ~12 s of the call, and
+         - app-limited: we sent ≈ our cap AND the estimate ≈ our cap — the
+           estimate is mirroring the cap, not measuring the link. */
+      const warmup = this.pollTick <= BWE_WARMUP_POLLS
+      const sentKbps = (bytesDelta * 8) / (STATS_INTERVAL_MS * 1000)
+      const appLimited =
+        !warmup &&
+        !!link &&
+        link.lastBudget > 0 &&
+        bweSmooth !== null &&
+        sentKbps >= (link.lastBudget / 1000) * APP_LIMITED_FACTOR &&
+        bweSmooth <= link.lastBudget * 1.2
+      const ignoreBwe = warmup || appLimited
       const prevLevel = useCallStore.getState().peers[peerId]?.level
+      const level = classifyLink(avgSmooth(link?.rttHist), avgSmooth(link?.lossHist), bweSmooth, {
+        mode: ignoreBwe ? 'ignore-bwe' : 'normal',
+        fallback: warmup ? 3 : (prevLevel ?? null),
+      })
       if (prevLevel !== level) useCallStore.getState().patchPeer(peerId, { level })
       connectedLevel = connectedLevel === null ? level : (Math.min(connectedLevel, level) as NetworkLevel)
       connectedCount++
       if (level <= 1) weakCount++
       overall = Math.min(overall, level) as NetworkLevel
-      totalKbps += (bytesDelta * 8) / (STATS_INTERVAL_MS * 1000)
+      totalKbps += sentKbps
 
       // One-way media watchdog: the DTLS association is up, the peer claims
       // to send, yet not a single byte arrived for ~15 s — the classic
@@ -1999,7 +2093,7 @@ export class CallEngine {
       }
 
       const screenLive = !!this.screenTrack && this.screenTrack.readyState === 'live'
-      sampled.set(peerId, { level, bytesDelta, inboundDelta, screenLive })
+      sampled.set(peerId, { level, bytesDelta, inboundDelta, screenLive, appLimited })
 
       if (encodeMs > worstEncodeMs) worstEncodeMs = encodeMs
       if (cpuLimited && reason === 'cpu') worstReason = 'cpu'
@@ -2014,25 +2108,28 @@ export class CallEngine {
         level,
         candidateType: link?.candType ?? '?',
       })
-      const linkBwe = avg3(link?.bweHist)
-      if (linkBwe !== null && (weakestBwe === null || linkBwe < weakestBwe)) weakestBwe = linkBwe
+      const linkBwe = avgSmooth(link?.bweHist)
+      // An app-limited link's estimate is our own cap echoed back — feeding
+      // it into the shared budget would shrink the cap ~20% every poll until
+      // the floor (the lock-low loop, caught by the offline tests). Only
+      // link-limited (real) estimates set the shared budget.
+      if (linkBwe !== null && !appLimited && (weakestBwe === null || linkBwe < weakestBwe)) {
+        weakestBwe = linkBwe
+      }
     }
 
     this.prevBytes = nextPrev
     this.prevInbound = nextPrevIn
     this.prevEncode = nextPrevEncode
 
-    /* ---- Upload budget (task 4): 0.8 × the weakest smoothed BWE across
-       connected links, audio reserved first, the remainder split evenly
-       across the video senders. A weak peer's SHARE shrinks and gets
-       scaleResolutionDownBy on ITS sender — the shared camera capture keeps
-       its size, so healthy links never lose picture because of one bad one. */
+    /* ---- Upload budget (task 4, via adaptive.splitBudget): 0.8 × the
+       weakest smoothed BWE across connected links, audio reserved first, the
+       remainder split evenly across the video senders. A weak peer's SHARE
+       shrinks and gets scaleResolutionDownBy on ITS sender — the shared
+       camera capture keeps its size, so healthy links never lose picture
+       because of one bad one. Probe-up: every PROBE_EVERY_POLLS the budget is
+       lifted for one poll so the transport can probe upward again. ---- */
     const audioPerPeer = overall === 0 ? AUDIO_SENDER_BITRATE_WEAK : AUDIO_SENDER_BITRATE
-    const budget = weakestBwe !== null ? weakestBwe * UPLOAD_BUDGET_SHARE : null
-    const videoShare =
-      budget !== null && connectedCount > 0
-        ? Math.max(BUDGET_VIDEO_FLOOR, (budget - audioPerPeer * connectedCount) / Math.max(1, connectedCount))
-        : null
 
     for (const [peerId, s] of sampled) {
       const link = this.links.get(peerId)
@@ -2040,17 +2137,25 @@ export class CallEngine {
       if (!link || !sender) continue
       const cap = LINK_CAPS[s.level]
       const base = s.screenLive ? this.screenCaps().maxBitrate : this.resolveProfile().maxBitrate
-      let target = cap !== null ? Math.min(cap, base) : base
-      let scale = 1
-      if (videoShare !== null && !s.screenLive && target > videoShare) {
-        target = Math.max(BUDGET_VIDEO_FLOOR, videoShare)
-        scale = target < BUDGET_SCALE4_BPS ? 4 : target < BUDGET_SCALE2_BPS ? 2 : 1
-      }
+      // Probe-up: lift the budget for ONE poll so a link that recovered (or
+      // was never as bad as the capped estimate suggested) can climb back.
+      const probing =
+        !s.screenLive && s.level <= 2 && this.pollTick - link.lastProbeTick >= PROBE_EVERY_POLLS
+      if (probing) link.lastProbeTick = this.pollTick
+      const { target, scale, share } = splitBudget({
+        weakestBwe,
+        level: s.level,
+        baseBitrate: base,
+        audioPerPeer,
+        connectedPeers: connectedCount,
+        screenLive: s.screenLive,
+        probing,
+        lastBudget: link.lastBudget,
+        lastScale: link.lastScale,
+      })
       // Hysteresis: rewrite sender params only on a >10% budget change or a
       // scale change — never per-poll ping-pong.
-      const meaningful =
-        Math.abs(target - link.lastBudget) > Math.max(target, link.lastBudget) * BUDGET_REWRITE_FACTOR
-      if (link.lastBudget === 0 || meaningful || scale !== link.lastScale) {
+      if (budgetChanged(link.lastBudget, target, link.lastScale, scale)) {
         link.lastBudget = target
         link.lastCap = cap
         link.lastScale = scale
@@ -2071,6 +2176,7 @@ export class CallEngine {
           /* ignore */
         }
       }
+      debugShare = share
     }
 
     // Ultra-low-bandwidth capture shrink: only when EVERY connected link is
@@ -2081,34 +2187,17 @@ export class CallEngine {
       else void this.restoreCapture()
     }
 
-    /* ---- CPU overload ladder (task 2): qualityLimitationReason 'cpu' for
-       CPU_STEP_POLLS consecutive polls steps down (resolution → fps →
-       audio-only send); recovery climbs one step per CPU_RECOVER_POLLS clean
-       polls. Only runs while video is actually being sent. ---- */
+    /* ---- CPU overload ladder (task 2, via adaptive.cpuLadderTick):
+       qualityLimitationReason 'cpu' for CPU_STEP_POLLS consecutive polls
+       steps down (resolution → fps → audio-only send); recovery climbs one
+       step per CPU_RECOVER_POLLS clean polls. Only runs while video is
+       actually being sent. ---- */
     const camSending =
       !this.cpuVideoPaused &&
       (useCallStore.getState().self.camOn || (!!this.screenTrack && this.screenTrack.readyState === 'live'))
-    if (camSending) {
-      if (worstReason === 'cpu') {
-        this.cpuBadTicks++
-        this.cpuCleanTicks = 0
-        if (this.cpuBadTicks >= CPU_STEP_POLLS && this.cpuBadTicks % CPU_STEP_POLLS === 0 && this.cpuStep < 3) {
-          this.cpuStep++
-          void this.applyCpuStep()
-        }
-      } else {
-        this.cpuCleanTicks++
-        this.cpuBadTicks = 0
-        if (this.cpuCleanTicks >= CPU_RECOVER_POLLS && this.cpuStep > 0) {
-          this.cpuStep--
-          this.cpuCleanTicks = 0
-          void this.applyCpuStep()
-        }
-      }
-    } else {
-      this.cpuBadTicks = 0
-      this.cpuCleanTicks = 0
-    }
+    const tick = cpuLadderTick(this.cpu, worstReason === 'cpu', camSending)
+    this.cpu = tick
+    if (tick.changed) void this.applyCpuStep()
 
     const prevOverall = useCallStore.getState().overallLevel
     if (prevOverall !== overall) {
@@ -2154,9 +2243,9 @@ export class CallEngine {
       useCallStore.getState().setDebug({
         level: overall,
         bweKbps: weakestBwe !== null ? Math.round(weakestBwe / 1000) : 0,
-        budgetKbps: videoShare !== null ? Math.round(videoShare / 1000) : 0,
+        budgetKbps: Math.round(debugShare / 1000),
         cpuReason: worstReason,
-        cpuStep: this.cpuStep,
+        cpuStep: this.cpu.step,
         encodeMsPerFrame: Math.round(worstEncodeMs * 10) / 10,
         peers: debugPeers,
       })
@@ -2171,7 +2260,7 @@ export class CallEngine {
    */
   private async applyCpuStep() {
     const store = useCallStore.getState()
-    if (this.cpuStep >= 3) {
+    if (this.cpu.step >= 3) {
       if (!this.cpuVideoPaused) {
         this.cpuVideoPaused = true
         store.setSelf({ camOn: false })
@@ -2189,7 +2278,7 @@ export class CallEngine {
       if (this.cameraTrack) this.cameraTrack.enabled = true
     }
     await this.applyProfile()
-    if (this.cpuStep >= 2 && this.cameraTrack?.readyState === 'live') {
+    if (this.cpu.step >= 2 && this.cameraTrack?.readyState === 'live') {
       try {
         await this.cameraTrack.applyConstraints({ frameRate: CPU_FPS_CAP })
       } catch {
@@ -2303,10 +2392,11 @@ export class CallEngine {
     this.prevEncode.clear()
     this.wishBy.clear()
     this.lastWish = ''
-    this.cpuStep = 0
-    this.cpuBadTicks = 0
-    this.cpuCleanTicks = 0
+    this.pollTick = 0
+    this.cpu = { step: 0, badTicks: 0, cleanTicks: 0 }
     this.cpuVideoPaused = false
+    this.unbindNetwork?.()
+    this.unbindNetwork = null
     this.captureShrunk = false
     this.socket?.disconnect()
     this.socket = null
