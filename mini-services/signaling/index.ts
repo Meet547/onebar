@@ -59,7 +59,10 @@ const infoServer = createHttpServer((req: IncomingMessage, res: ServerResponse) 
 })
 
 /** engine.io allowRequest — fail-closed Origin check on WS upgrades
- *  (duplicated from src/lib/relay-server.ts; this service ships standalone). */
+ *  (duplicated from src/lib/relay-server.ts; this service ships standalone).
+ *  Same rule: no Origin → pass; Origin host === x-forwarded-host (set by
+ *  Caddy/the proxy for the browser-facing host) or === Host → pass; exact
+ *  Origin in ORIGIN (compose always sets it) → pass; else reject. */
 function originGuard(
   req: { headers: Record<string, string | string[] | undefined> },
   cb: (err: string | null | undefined, ok: boolean) => void,
@@ -70,14 +73,18 @@ function originGuard(
     .filter(Boolean)
   const origin = req.headers.origin
   if (!origin || typeof origin !== 'string') return cb(null, true)
-  let originHost = ''
+  let parsed: URL
   try {
-    originHost = new URL(origin).host
+    parsed = new URL(origin)
   } catch {
     return cb(null, false)
   }
+  const xfHost = Array.isArray(req.headers['x-forwarded-host'])
+    ? req.headers['x-forwarded-host'][0]
+    : req.headers['x-forwarded-host']
   const host = typeof req.headers.host === 'string' ? req.headers.host : ''
-  if (originHost === host) return cb(null, true)
+  if (xfHost && parsed.host === xfHost.split(',')[0]!.trim()) return cb(null, true)
+  if (parsed.host === host) return cb(null, true)
   if (allowlist.includes(origin)) return cb(null, true)
   cb(null, false)
 }

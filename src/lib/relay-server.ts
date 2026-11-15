@@ -207,9 +207,16 @@ function createInfoServer(): ReturnType<typeof createHttpServer> {
 
 /** engine.io allowRequest — fail-closed Origin check on WS upgrades.
  *  - no Origin header (native clients, probes): allowed
- *  - Origin host === Host header (same origin, through Caddy or direct): allowed
- *  - exact Origin listed in ORIGIN (comma-separated): allowed
- *  - everything else: rejected */
+ *  - Origin host === x-forwarded-host (the browser-facing host as seen
+ *    through the Next rewrite / a reverse proxy) or === Host header
+ *    (direct same-origin): allowed
+ *  - exact Origin listed in ORIGIN, or equal to NEXT_PUBLIC_SITE_URL's
+ *    origin: allowed
+ *  - everything else: rejected
+ *  Verified live: the Next rewrite forwards Origin intact and sets
+ *  x-forwarded-host to the front-door host while `host` is the upstream
+ *  relay address — without the x-forwarded-host comparison every
+ *  browser handshake would be rejected through the proxy. */
 function originGuard(): (
   req: IncomingMessage,
   cb: (err: string | null | undefined, ok: boolean) => void,
@@ -218,18 +225,32 @@ function originGuard(): (
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean)
+  const siteOrigin = (() => {
+    const v = process.env.NEXT_PUBLIC_SITE_URL
+    if (!v) return null
+    try {
+      return new URL(v).origin
+    } catch {
+      return null
+    }
+  })()
   return (req, cb) => {
     const origin = req.headers.origin
     if (!origin) return cb(null, true)
-    let originHost = ''
+    let parsed: URL
     try {
-      originHost = new URL(origin).host
+      parsed = new URL(origin)
     } catch {
       return cb(null, false)
     }
+    const xfHost = Array.isArray(req.headers['x-forwarded-host'])
+      ? req.headers['x-forwarded-host'][0]
+      : req.headers['x-forwarded-host']
     const host = req.headers.host ?? ''
-    if (originHost === host) return cb(null, true)
+    if (xfHost && parsed.host === xfHost.split(',')[0]!.trim()) return cb(null, true)
+    if (parsed.host === host) return cb(null, true)
     if (allowlist.includes(origin)) return cb(null, true)
+    if (siteOrigin && parsed.origin === siteOrigin) return cb(null, true)
     cb(null, false)
   }
 }
