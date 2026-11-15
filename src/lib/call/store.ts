@@ -105,6 +105,10 @@ interface CallStore {
   setMusic: (partial: Partial<MusicState>) => void
   setLite: (v: boolean, auto?: boolean) => void
   setDebug: (d: DebugInfo | null) => void
+  /** Human-readable media problem ("mic blocked", "no camera", …) set by the
+   *  engine / pre-join screen; null = healthy. Drives the retry banner. */
+  mediaNotice: string | null
+  setMediaNotice: (v: string | null) => void
   reset: () => void
 }
 
@@ -179,6 +183,8 @@ export const useCallStore = create<CallStore>((set, get) => ({
   setMusic: (partial) => set((s) => ({ music: { ...s.music, ...partial } })),
   setLite: (v, auto = false) => set({ lite: v, liteAuto: auto }),
   setDebug: (d) => set({ debug: d }),
+  mediaNotice: null,
+  setMediaNotice: (v) => set({ mediaNotice: v }),
   reset: () =>
     set({
       signalingConnected: false,
@@ -195,5 +201,6 @@ export const useCallStore = create<CallStore>((set, get) => ({
       kicked: false,
       music: INITIAL_MUSIC,
       debug: null,
+      mediaNotice: null,
     }),
 }))

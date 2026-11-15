@@ -3,10 +3,12 @@
 #     encoder and would REFUSE to start on that line)
 #   - layer4: the optional TURN-over-TLS SNI multiplex on 443 (DEPLOY.md) —
 #     shipping it here makes that setup work without a hand-built caddy
-FROM caddy:2-builder AS builder
+# Pinned builds (tags verified against Docker Hub): a deploy reproduces the
+# same binary with the same modules every time.
+FROM caddy:2.11.9-builder AS builder
 RUN xcaddy build \
     --with github.com/mholt/caddy-brotli \
     --with github.com/mholt/caddy-l4
 
-FROM caddy:2
+FROM caddy:2.11.9
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy

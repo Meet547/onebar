@@ -1,18 +1,18 @@
 import { NextResponse } from 'next/server'
 import { readFile, stat } from 'node:fs/promises'
-import { createHash, timingSafeEqual } from 'node:crypto'
+import { providedToken, tokenMatches } from '@/lib/health-token'
 import { resolvePicoVersion } from '@/lib/server-version'
 
 /**
  * Service health + TURN allocation observability.
  *
  * Privacy: `{ok, version}` is public — everything about TURN (allocation
- * counts, quotas, stats paths) is TOKEN-GATED. Set HEALTH_TOKEN in the
- * environment and pass it as the `x-health-token` header (or `?token=`).
- * Without a valid token the response carries no allocation or quota numbers
- * at all; a provided-but-wrong token is a 401 (misconfiguration signal).
- * With no HEALTH_TOKEN configured the data stays open (dev/local mode) —
- * scripts/check-live.sh treats that as a FAIL on a production deployment.
+ * counts, quotas, stats paths) is TOKEN-GATED and FAILS CLOSED: set
+ * HEALTH_TOKEN in the environment and pass it as the `x-health-token`
+ * header (or `?token=`). Without a configured token the gated data is
+ * never served at all; a provided-but-wrong token is a 401
+ * (misconfiguration signal). scripts/check-live.sh treats a deployment
+ * without a token as a privacy FAIL.
  *
  * `version`    — the deployment version, resolved like the x-pico-version
  *                header and the socket version handshake (src/lib/
@@ -31,8 +31,7 @@ import { resolvePicoVersion } from '@/lib/server-version'
 
 export const dynamic = 'force-dynamic'
 
-const STATS_FILE_DEFAULT = '/etc/coturn/stats/turn-stats.json'
-// File is rewritten every TURN_STATS_INTERVAL (default 10 s); anything older
+const STATS_FILE_DEFAULT = '/etc/coturn/stats/turn-stats.json'// File is rewritten every TURN_STATS_INTERVAL (default 10 s); anything older
 // than this means the coturn stats loop stopped.
 const STALE_AFTER_MS = 60_000
 
@@ -44,21 +43,9 @@ interface TurnStats {
   totalQuota?: number
 }
 
-/** Constant-time token check (both sides hashed to a fixed length first). */
-function tokenMatches(provided: string | null): boolean {
-  const expected = process.env.HEALTH_TOKEN
-  if (!expected) return true // no gate configured — dev/local mode
-  if (!provided) return false
-  const a = createHash('sha256').update(expected).digest()
-  const b = createHash('sha256').update(provided).digest()
-  return timingSafeEqual(a, b)
-}
-
 export async function GET(request: Request) {
   const noStore = { 'Cache-Control': 'no-store' }
-  const url = new URL(request.url)
-  const provided =
-    request.headers.get('x-health-token') ?? url.searchParams.get('token')
+  const provided = providedToken(request)
 
   // Public shape — always served, contains nothing about TURN internals.
   const body: Record<string, unknown> = { ok: true, version: resolvePicoVersion() }

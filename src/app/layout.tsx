@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { Toaster } from "sonner";
+import { ClientErrorReporter } from "./client-error-report";
 
 const TITLE = "Pico — calls that weigh nothing";
 const DESCRIPTION =
@@ -55,6 +56,8 @@ export default function RootLayout({
         {/* Version guard: registers the app-shell service worker and reloads
             once when a hashed chunk fails (deploy under a long-lived tab). */}
         <script src="/version-guard.js" defer />
+        {/* Global client error reporting → /api/client-error (throttled, no PII). */}
+        <ClientErrorReporter />
         {children}
         <Toaster
           position="top-center"

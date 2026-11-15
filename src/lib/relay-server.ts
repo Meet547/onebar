@@ -205,6 +205,35 @@ function createInfoServer(): ReturnType<typeof createHttpServer> {
   return info
 }
 
+/** engine.io allowRequest — fail-closed Origin check on WS upgrades.
+ *  - no Origin header (native clients, probes): allowed
+ *  - Origin host === Host header (same origin, through Caddy or direct): allowed
+ *  - exact Origin listed in ORIGIN (comma-separated): allowed
+ *  - everything else: rejected */
+function originGuard(): (
+  req: IncomingMessage,
+  cb: (err: string | null | undefined, ok: boolean) => void,
+) => void {
+  const allowlist = (process.env.ORIGIN ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  return (req, cb) => {
+    const origin = req.headers.origin
+    if (!origin) return cb(null, true)
+    let originHost = ''
+    try {
+      originHost = new URL(origin).host
+    } catch {
+      return cb(null, false)
+    }
+    const host = req.headers.host ?? ''
+    if (originHost === host) return cb(null, true)
+    if (allowlist.includes(origin)) return cb(null, true)
+    cb(null, false)
+  }
+}
+
 // ---------------- wire the socket.io relay onto an http server ------------
 
 function attachRelay(httpServer: ReturnType<typeof createHttpServer>): IoServer {
@@ -213,6 +242,13 @@ function attachRelay(httpServer: ReturnType<typeof createHttpServer>): IoServer 
     // rewrites strip the /signal prefix, so the relay keeps '/' by default.
     path: SOCKET_PATH,
     cors: { origin: (process.env.ORIGIN ?? '*').split(',').map((s) => s.trim()), methods: ['GET', 'POST'] },
+    // Origin gate on the WS upgrade itself (engine.io allowRequest) — CORS
+    // headers alone do not stop a cross-origin WebSocket, because browsers do
+    // not enforce CORS on upgrades. FAILS CLOSED: no Origin header (native /
+    // same-host clients) and exact same-origin always pass; any other origin
+    // must be listed in ORIGIN (comma-separated). Default = same-origin only,
+    // so a page on another domain cannot open signaling sockets here.
+    allowRequest: originGuard(),
     pingTimeout: 45000,
     pingInterval: 20000,
     // Keep the socket payload tiny; websocket transport only after handshake

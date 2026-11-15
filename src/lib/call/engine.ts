@@ -339,6 +339,8 @@ export class CallEngine {
   private cpuVideoPaused = false
   /** Last 20 adaptation events for the ?debug=1 field report (newest last). */
   private adaptLog: string[] = []
+  /** Poll counter for the periodic anonymized quality sample. */
+  private qualityTick = 0
 
   /** Append to the adaptation event ring buffer, capped at 20 entries. */
   private logAdapt(msg: string) {
@@ -779,9 +781,11 @@ export class CallEngine {
       this.micTrack = this.localStream.getAudioTracks()[0] ?? null
       this.cameraTrack = this.localStream.getVideoTracks()[0] ?? null
       this.attachLocalStream()
+      useCallStore.getState().setMediaNotice(null)
       return 'full'
     } catch {
-      /* fall through */
+      // Video failure alone is normal (no camera / camera busy) — the audio
+      // attempt below decides the user-visible notice.
     }
     // Audio only
     try {
@@ -789,13 +793,75 @@ export class CallEngine {
       this.micTrack = this.localStream.getAudioTracks()[0] ?? null
       this.cameraTrack = null
       this.attachLocalStream()
+      useCallStore.getState().setMediaNotice(null)
       return 'audio'
-    } catch {
-      /* fall through */
+    } catch (e) {
+      // Permission denied / no device / device busy — the join continues as a
+      // listener, but the user must KNOW why (and how to fix it).
+      const name = (e as DOMException)?.name ?? ''
+      const notice =
+        name === 'NotAllowedError'
+          ? 'Mic/camera blocked — allow access via the padlock icon in the address bar, then retry.'
+          : name === 'NotFoundError'
+            ? 'No microphone found on this device.'
+            : name === 'NotReadableError'
+              ? 'Mic/camera is busy in another app — close it and retry.'
+              : `Mic/camera unavailable (${name || 'unknown error'}).`
+      useCallStore.getState().setMediaNotice(notice)
     }
     // Listener mode
     this.localStream = null
     return 'none'
+  }
+
+  /**
+   * Swap the mic or camera mid-call without renegotiation: gUM the exact
+   * device, replaceTrack into every live sender, stop the old track. The
+   * DTLS association survives (replaceTrack only swaps the source), so peers
+   * just see/hear the new device. Returns false (and sets mediaNotice) when
+   * the new device cannot be opened — the old track stays live in that case.
+   */
+  async switchDevice(kind: 'mic' | 'cam', deviceId: string): Promise<boolean> {
+    try {
+      const constraints: MediaStreamConstraints =
+        kind === 'mic'
+          ? {
+              audio: {
+                deviceId: { exact: deviceId },
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+                channelCount: 1,
+              },
+            }
+          : { video: { deviceId: { exact: deviceId }, ...this.videoConstraints(this.resolveProfile()) } }
+      const stream = await navigator.mediaDevices.getUserMedia(constraints)
+      const newTrack = kind === 'mic' ? stream.getAudioTracks()[0] : stream.getVideoTracks()[0]
+      if (!newTrack) throw new Error('device returned no track')
+      const old = kind === 'mic' ? this.micTrack : this.cameraTrack
+      if (kind === 'mic') this.micTrack = newTrack
+      else this.cameraTrack = newTrack
+      for (const [, senders] of this.sendersMap) {
+        const sender = kind === 'mic' ? senders.audio : senders.video
+        if (sender) void sender.replaceTrack(newTrack).catch(() => undefined)
+      }
+      if (this.localStream) {
+        if (old) this.localStream.removeTrack(old)
+        this.localStream.addTrack(newTrack)
+        putStream('self', this.localStream)
+      }
+      old?.stop()
+      useCallStore.getState().setMediaNotice(null)
+      return true
+    } catch (e) {
+      const name = (e as DOMException)?.name ?? ''
+      useCallStore.getState().setMediaNotice(
+        name === 'NotAllowedError'
+          ? 'Device switch blocked by the browser — allow access and retry.'
+          : 'Could not open the selected device.',
+      )
+      return false
+    }
   }
 
   private videoConstraints(profile: QualityProfile): MediaTrackConstraints {
@@ -1343,6 +1409,7 @@ export class CallEngine {
     this.wishBy.clear()
     this.lastWish = ''
     this.pollTick = 0
+    this.qualityTick = 0
     this.cpu = { step: 0, badTicks: 0, cleanTicks: 0 }
     this.cpuVideoPaused = false
     this.unbindNetwork?.()
@@ -2372,6 +2439,39 @@ export class CallEngine {
         events: [...this.adaptLog],
       })
     }
+
+    // Production quality telemetry: every 12th poll (~36 s) push one
+    // anonymized sample to /api/quality — NUMBERS ONLY (level, bwe, loss,
+    // rtt, cpu, candidate TYPE, peer count). No ids, no room codes, no IPs,
+    // no user agent; NEXT_PUBLIC_TELEMETRY=0 at build time turns it off.
+    this.qualityTick++
+    if (this.qualityTick % 12 === 0) {
+      this.sendQuality({
+        level: overall,
+        bweKbps: weakestBwe !== null ? Math.round(weakestBwe / 1000) : null,
+        budgetKbps: Math.round(debugShare),
+        lossPct: worstLossPct,
+        rttMs: worstRttMs,
+        cpuReason: worstReason,
+        cpuStep: this.cpu.step,
+        candType: debugPeers[0]?.candidateType ?? null,
+        peers: debugPeers.length,
+      })
+    }
+  }
+
+  /** POST one anonymized quality sample; silent on any failure. */
+  private sendQuality(sample: Record<string, unknown>) {
+    try {
+      fetch('/api/quality', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ver: process.env.NEXT_PUBLIC_PICO_VERSION ?? null, ...sample }),
+        keepalive: true,
+      }).catch(() => undefined)
+    } catch {
+      /* telemetry must never affect the call */
+    }
   }
 
   /**
@@ -2515,6 +2615,7 @@ export class CallEngine {
     this.wishBy.clear()
     this.lastWish = ''
     this.pollTick = 0
+    this.qualityTick = 0
     this.cpu = { step: 0, badTicks: 0, cleanTicks: 0 }
     this.cpuVideoPaused = false
     this.unbindNetwork?.()

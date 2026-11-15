@@ -905,6 +905,7 @@ export function QualityPanel({ onClose }: { onClose: () => void }) {
   return (
     <Sheet title="Video quality" onClose={onClose}>
       <div className="ios-scroll flex-1 overflow-y-auto p-4">
+        <DeviceSection />
         <div className="mb-4 flex items-center justify-between rounded-[18px] bg-[#f5f5f7] px-4 py-3">
           <div>
             <p className="text-[15px] font-bold text-[#0d0d0f]">{effective || 'Auto'}</p>
@@ -962,5 +963,67 @@ export function QualityPanel({ onClose }: { onClose: () => void }) {
         </p>
       </div>
     </Sheet>
+  )
+}
+
+/** In-call mic/camera switching (replaceTrack — no renegotiation). Devices
+ *  list refreshes on every panel open; a failed switch keeps the old device
+ *  and surfaces the reason via the store's mediaNotice. */
+function DeviceSection() {
+  const [mics, setMics] = useState<MediaDeviceInfo[]>([])
+  const [cams, setCams] = useState<MediaDeviceInfo[]>([])
+  const [selMic, setSelMic] = useState('')
+  const [selCam, setSelCam] = useState('')
+  const mediaNotice = useCallStore((s) => s.mediaNotice)
+
+  useEffect(() => {
+    let cancelled = false
+    navigator.mediaDevices
+      .enumerateDevices()
+      .then((all) => {
+        if (cancelled) return
+        setMics(all.filter((d) => d.kind === 'audioinput'))
+        setCams(all.filter((d) => d.kind === 'videoinput'))
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  if (mics.length < 2 && cams.length < 2 && !mediaNotice) return null
+  return (
+    <div className="mb-4 flex flex-col gap-2 rounded-[18px] bg-[#f5f5f7] px-4 py-3">
+      <p className="text-[12px] font-bold uppercase tracking-wide text-[#7c7c82]">Devices</p>
+      {mics.length > 1 && (
+        <select
+          value={selMic}
+          onChange={(e) => {
+            setSelMic(e.target.value)
+            void getEngine().switchDevice('mic', e.target.value)
+          }}
+          className="w-full rounded-lg border border-black/10 bg-white px-2 py-1.5 text-[13px] font-medium text-[#0d0d0f]"
+        >
+          {mics.map((d) => (
+            <option key={d.deviceId} value={d.deviceId}>{d.label || 'Microphone'}</option>
+          ))}
+        </select>
+      )}
+      {cams.length > 1 && (
+        <select
+          value={selCam}
+          onChange={(e) => {
+            setSelCam(e.target.value)
+            void getEngine().switchDevice('cam', e.target.value)
+          }}
+          className="w-full rounded-lg border border-black/10 bg-white px-2 py-1.5 text-[13px] font-medium text-[#0d0d0f]"
+        >
+          {cams.map((d) => (
+            <option key={d.deviceId} value={d.deviceId}>{d.label || 'Camera'}</option>
+          ))}
+        </select>
+      )}
+      {mediaNotice && <p className="text-[12px] font-medium text-amber-700">{mediaNotice}</p>}
+    </div>
   )
 }

@@ -95,6 +95,7 @@ def main():
         time.sleep(2)
         created = count_relay(61000, 61050)
     real = count_relay(61000, 61050)
+    os.makedirs(os.path.dirname(REAL_STATS), exist_ok=True)
     with open(REAL_STATS, "w") as f:
         json.dump({"ts": int(time.time() * 1000), "allocations": int(real or 0),
                    "relayPorts": [49152, 65535], "userQuota": 30, "totalQuota": 1000}, f)
@@ -128,8 +129,11 @@ def main():
     stop()
 
     # 1. Real stats present — /api/health must mirror the exact /proc count.
-    start({"TURN_STATS_FILE": REAL_STATS, "PICO_VERSION": "testv1"})
-    body = json.loads(curl("/api/health"))
+    #    Turn data is fail-closed: every gated read below carries the token.
+    TOK = "sekrit"
+    start({"TURN_STATS_FILE": REAL_STATS, "PICO_VERSION": "testv1",
+           "HEALTH_TOKEN": TOK})
+    body = json.loads(curl("/api/health", extra=[f"x-health-token: {TOK}"]))
     check("version reported", body.get("version") == "testv1", str(body.get("version")))
     check("turn.allocations is a number", isinstance(body["turn"]["allocations"], int))
     check("allocations == live /proc count", body["turn"]["allocations"] == int(real or 0),
@@ -147,8 +151,9 @@ def main():
     stop()
 
     # 2. Stats file missing (dev without coturn).
-    start({"TURN_STATS_FILE": "/nonexistent/turn-stats.json", "PICO_VERSION": "testv2"})
-    body = json.loads(curl("/api/health"))
+    start({"TURN_STATS_FILE": "/nonexistent/turn-stats.json", "PICO_VERSION": "testv2",
+           "HEALTH_TOKEN": TOK})
+    body = json.loads(curl("/api/health", extra=[f"x-health-token: {TOK}"]))
     check("missing file → allocations null", body["turn"]["allocations"] is None)
     check("missing file → ok:true (health never flaps)", body.get("ok") is True)
     check("note explains the absence", "not found" in body["turn"]["note"])
@@ -158,8 +163,9 @@ def main():
     with open(REAL_STATS, "w") as f:
         json.dump({"ts": 1000, "allocations": 9, "relayPorts": [49152, 65535],
                    "userQuota": 30, "totalQuota": 1000}, f)
-    start({"TURN_STATS_FILE": REAL_STATS, "PICO_VERSION": "testv3"})
-    body = json.loads(curl("/api/health"))
+    start({"TURN_STATS_FILE": REAL_STATS, "PICO_VERSION": "testv3",
+           "HEALTH_TOKEN": TOK})
+    body = json.loads(curl("/api/health", extra=[f"x-health-token: {TOK}"]))
     check("stale ts → stale:true", body["turn"]["stale"] is True, str(body["turn"]))
     stop()
 
@@ -181,6 +187,19 @@ def main():
     body = json.loads(curl("/api/health?token=sekrit"))
     check("right token (query) → allocations present",
           isinstance(body.get("turn", {}).get("allocations"), int), str(body)[:200])
+    stop()
+
+    # 5. Fail closed: with NO HEALTH_TOKEN configured the gated data is never
+    #    served — even a guessed or query-supplied token gets nothing.
+    start({"TURN_STATS_FILE": REAL_STATS, "PICO_VERSION": "testv5"})
+    body = json.loads(curl("/api/health?token=sekrit"))
+    check("unset token + query token → still fail-closed", "turn" not in body,
+          str(body.keys()))
+    body = json.loads(curl("/api/health", extra=["x-health-token: sekrit"]))
+    check("unset token + header token → still fail-closed", "turn" not in body,
+          str(body.keys()))
+    check("public body still ok+version", body.get("ok") is True
+          and body.get("version") == "testv5", str(body))
     stop()
 
     print("—")

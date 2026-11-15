@@ -57,6 +57,18 @@ and nothing static is exposed.
 
 ## Deploy in four steps
 
+One-command path (fresh Ubuntu VPS, root — installs Docker, writes .env with
+generated secrets, applies sysctl/ufw, builds, waits for every compose
+healthcheck, then runs `check-live.sh` as the gate):
+
+```bash
+ssh root@<server-ip> 'bash -s' < scripts/deploy.sh
+```
+
+Every deploy appends its `PICO_VERSION` to `.deploy-history` on the server —
+that file is what `scripts/rollback.sh` consumes (see Operations below).
+The manual four steps below are exactly what the script automates.
+
 ### 1 · Prepare
 
 ```bash
@@ -137,6 +149,44 @@ Then the human test: open the site in a normal browser and in a phone on
 **cellular data** (not your wifi), join the same room, and confirm both
 audio and video flow. Cellular vs. home wifi is exactly the asymmetric-NAT
 pair that proves TURN works.
+
+### 5 · Operations
+
+**Uptime monitoring.** Point an external monitor (healthchecks.io,
+UptimeRobot, Better Stack — anything that can HTTP-GET) at
+`https://call.example.com/api/health` every 60 s: the public body is
+`{ok, version}` — no token needed, no TURN data leaks. Alert on non-200 or
+`ok:false`. The gated view (same URL with your `HEALTH_TOKEN`) adds
+allocations vs quota for deeper dashboards; keep the token out of alert
+messages.
+
+**Error reporting.** Client crashes reach `/api/client-error` (throttled,
+no PII — room codes live in query strings and never leave the browser) and
+land as one JSON line each in the app logs: `docker compose logs app | grep
+clientError`. No third-party endpoint — ship the log lines to whatever
+collector you already run.
+
+**Call-quality telemetry.** The engine posts one anonymized sample every
+~36 s to `/api/quality` (numbers only: level, BWE, loss, RTT, CPU, candidate
+TYPE, peer count — no ids, no room codes, no IPs, no user agent). Samples
+land in the app log (`grep quality`) and a small in-memory ring:
+
+```bash
+curl -s -H "x-health-token: $HEALTH_TOKEN" https://call.example.com/api/quality
+```
+
+Set `NEXT_PUBLIC_TELEMETRY=0` at build time to turn it off entirely.
+
+**Rollback.** `scripts/rollback.sh 1` redeploys the previous entry from
+`.deploy-history` (checks out that commit, rebuilds with ITS version stamp).
+Clients auto-reload once to the old version, and the service worker keeps
+the previous version's cache warm by design — rollback is the reason why.
+
+**Container health.** Every service has a compose healthcheck (app:
+`/api/health`, signaling: `:3004/healthz`, coturn: relay process + cert
+expiry/SAN match, caddy: config validate) and `restart: unless-stopped`.
+`docker compose ps` shows health; `docker compose up -d --wait` fails
+loudly if any service never comes up (deploy.sh relies on this).
 
 ---
 

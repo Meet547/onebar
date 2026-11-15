@@ -57,8 +57,8 @@ services:
       # Live TURN allocation stats (written by coturn's stats loop, below).
       - TURN_STATS_FILE=/etc/coturn/stats/turn-stats.json
       # Token for the gated half of /api/health (allocation vs quota numbers).
-      # Without it the turn data is public — check-live.sh flags that on prod.
-      # Generate: openssl rand -hex 24
+      # FAILS CLOSED: unset → the gated data is never served at all (public
+      # body stays {ok, version}). Generate: openssl rand -hex 24
       - HEALTH_TOKEN=${HEALTH_TOKEN:-}
       # Hostname of the turns: listener — the name whose certificate coturn
       # serves and whose SNI the Caddy layer4 multiplex matches. Defaults to
@@ -70,6 +70,13 @@ services:
       - PICO_EMBEDDED_RELAY=0
       - RELAY_UPSTREAM=http://signaling:3003
       - INFO_UPSTREAM=http://signaling:3004
+    healthcheck:
+      # node fetch — the runner image has no curl/wget.
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     volumes:
       # coturn's live allocation stats (see /api/health), read-only.
       - coturn_stats:/etc/coturn/stats:ro
@@ -90,11 +97,19 @@ services:
       - ORIGIN=https://${PICO_DOMAIN}
       # Answered back in the socket version handshake (see version:hello).
       - PICO_VERSION=${PICO_VERSION:-}
+    healthcheck:
+      test: ["CMD-SHELL", "bun -e \"fetch('http://127.0.0.1:3004/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     networks:
       - pico
 
   coturn:
-    image: coturn/coturn:latest
+    # Pinned (tag verified against Docker Hub): reproducible deploys, no
+    # surprise behavior changes from :latest.
+    image: coturn/coturn:4.19.0-r0
     restart: unless-stopped
     # host networking: TURN must see real client IPs and bind the UDP relay range
     network_mode: host
@@ -253,8 +268,19 @@ services:
       - TURN_TLS_HOST=${TURN_TLS_HOST:-turn.${PICO_DOMAIN}}
     volumes:
       - ./Caddyfile.production:/etc/caddy/Caddyfile:ro
+      # Persistent cert store — redeploys and container recreation MUST NOT
+      # lose it, or every restart re-runs ACME issuance and eventually trips
+      # Let's Encrypt rate limits (5 duplicate certs/week per domain).
       - caddy_data:/data
       - caddy_config:/config
+    healthcheck:
+      # Config-parseable + binary responsive. (A TCP/TLS check against
+      # 127.0.0.1 would need SNI games; validate exercises the real config.)
+      test: ["CMD-SHELL", "caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 || exit 1"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 20s
     networks:
       - pico
     depends_on:

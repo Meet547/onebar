@@ -49,6 +49,16 @@
 
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# Camera/mic/display-capture stay same-origin; everything else denied.
+		Permissions-Policy "camera=(self), microphone=(self), display-capture=(self), geolocation=(), payment=(), usb=()"
+		# CSP: Next.js injects inline bootstrap scripts and styles → 'unsafe-inline'
+		# for script/style (pragmatic; removing it needs nonce plumbing through
+		# every page). WebRTC's ICE needs stun:/turn:/turns: in connect-src.
+		# blob: covers MediaStream <video> srcObject and screen-share previews.
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' stun: turn: turns:; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 	}
 }
 

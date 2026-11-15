@@ -138,11 +138,29 @@ export const SCREEN_SHARE: Record<
 
 export const ROOM_CODE_CHARS = 'abcdefghjkmnpqrstuvwxyz23456789'
 
+/** Room codes are bearer credentials: whoever has the code can join.
+ *  16 chars from a 31-symbol alphabet ≈ 79 bits of entropy — enumeration is
+ *  infeasible and a leaked short URL can't be guessed offline. Random source
+ *  is crypto.getRandomValues (Math.random is NOT cryptographically secure
+ *  and is predictable when internals are observable). */
 export function generateRoomCode(): string {
+  const groups = 4
+  const per = 4
+  const buf = new Uint32Array(groups * per)
+  const crypto = globalThis.crypto
+  if (crypto?.getRandomValues) {
+    crypto.getRandomValues(buf)
+  } else {
+    // Exotic environment without WebCrypto — should never run in browsers
+    // or Node ≥ 19; kept so the function cannot throw at join time.
+    for (let i = 0; i < buf.length; i++) buf[i] = Math.floor(Math.random() * 2 ** 32)
+  }
   let code = ''
-  for (let i = 0; i < 9; i++) {
-    if (i === 3 || i === 6) code += '-'
-    code += ROOM_CODE_CHARS[Math.floor(Math.random() * ROOM_CODE_CHARS.length)]
+  for (let g = 0; g < groups; g++) {
+    if (g > 0) code += '-'
+    for (let i = 0; i < per; i++) {
+      code += ROOM_CODE_CHARS[buf[g * per + i] % ROOM_CODE_CHARS.length]
+    }
   }
   return code
 }

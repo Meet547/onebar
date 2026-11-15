@@ -8,6 +8,11 @@ import { ROOM_INFO_URL } from '@/lib/call/config'
 
 type PreviewMode = 'loading' | 'full' | 'audio' | 'none'
 
+interface DeviceEntry {
+  deviceId: string
+  label: string
+}
+
 interface RoomInfo {
   exists: boolean
   locked: boolean
@@ -26,6 +31,8 @@ interface PreJoinProps {
   onJoin: (stream: MediaStream | null, passcode: string) => boolean | void | Promise<boolean | void>
 }
 
+const AUDIO_BASE = { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 }
+
 export function PreJoin({ roomCode, testMode, joinError, onBack, onJoin }: PreJoinProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const nameRef = useRef<HTMLInputElement>(null)
@@ -36,6 +43,14 @@ export function PreJoin({ roomCode, testMode, joinError, onBack, onJoin }: PreJo
   const [joining, setJoining] = useState(false)
   const [passcode, setPasscode] = useState('')
   const [roomInfo, setRoomInfo] = useState<RoomInfo | null>(null)
+  // Device pickers: labels only exist AFTER a successful getUserMedia.
+  const [mics, setMics] = useState<DeviceEntry[]>([])
+  const [cams, setCams] = useState<DeviceEntry[]>([])
+  const [selMic, setSelMic] = useState('')
+  const [selCam, setSelCam] = useState('')
+  const mediaNotice = useCallStore((s) => s.mediaNotice)
+  const setMediaNotice = useCallStore((s) => s.setMediaNotice)
+  const [retryTick, setRetryTick] = useState(0)
   const micOn = useCallStore((s) => s.self.micOn)
   const camOn = useCallStore((s) => s.self.camOn)
 
@@ -55,26 +70,58 @@ export function PreJoin({ roomCode, testMode, joinError, onBack, onJoin }: PreJo
       if (!cancelled && data) setRoomInfo(data)
     })
 
+    const listDevices = async () => {
+      try {
+        const all = await navigator.mediaDevices.enumerateDevices()
+        setMics(
+          all
+            .filter((d) => d.kind === 'audioinput')
+            .map((d) => ({ deviceId: d.deviceId, label: d.label || 'Microphone' })),
+        )
+        setCams(
+          all
+            .filter((d) => d.kind === 'videoinput')
+            .map((d) => ({ deviceId: d.deviceId, label: d.label || 'Camera' })),
+        )
+      } catch {
+        /* no device list — the selects simply stay hidden */
+      }
+    }
+
     const acquire = async () => {
       let stream: MediaStream | null = null
+      setMediaNotice(null)
       if (testMode) {
         stream = await createTestStream()
         setMode('full')
       } else {
+        // Exact device when the user picked one; otherwise the OS default.
+        const audio = selMic ? { ...AUDIO_BASE, deviceId: { exact: selMic } } : AUDIO_BASE
+        const video = selCam
+          ? { width: { ideal: 480 }, height: { ideal: 360 }, frameRate: { ideal: 15, max: 24 }, facingMode: 'user', deviceId: { exact: selCam } }
+          : { width: { ideal: 480 }, height: { ideal: 360 }, frameRate: { ideal: 15, max: 24 }, facingMode: 'user' }
         try {
-          stream = await navigator.mediaDevices.getUserMedia({
-            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
-            video: { width: { ideal: 480 }, height: { ideal: 360 }, frameRate: { ideal: 15, max: 24 }, facingMode: 'user' },
-          })
+          stream = await navigator.mediaDevices.getUserMedia({ audio, video })
           setMode('full')
-        } catch {
+        } catch (videoErr) {
+          // Video alone failing is normal (no camera / camera busy) — the
+          // audio attempt decides the notice.
           try {
-            stream = await navigator.mediaDevices.getUserMedia({
-              audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
-            })
+            stream = await navigator.mediaDevices.getUserMedia({ audio })
             setMode('audio')
-          } catch {
+          } catch (e) {
+            const name = (e as DOMException)?.name ?? ''
             setMode('none')
+            setMediaNotice(
+              name === 'NotAllowedError'
+                ? 'Mic/camera blocked — allow access via the padlock icon in the address bar, then retry.'
+                : name === 'NotFoundError'
+                  ? 'No microphone found on this device.'
+                  : name === 'NotReadableError'
+                    ? 'Mic/camera is busy in another app — close it and retry.'
+                    : `Mic/camera unavailable (${name || 'unknown error'}).`,
+            )
+            void videoErr // inspected only for debugging; the audio error is what matters
           }
         }
       }
@@ -87,6 +134,7 @@ export function PreJoin({ roomCode, testMode, joinError, onBack, onJoin }: PreJo
         videoRef.current.srcObject = stream
         videoRef.current.play().catch(() => undefined)
       }
+      if (stream) void listDevices()
     }
     void acquire()
 
@@ -95,7 +143,7 @@ export function PreJoin({ roomCode, testMode, joinError, onBack, onJoin }: PreJo
       // Stop preview only if it was not handed to the engine on join
       if (!handedOff.current) streamRef.current?.getTracks().forEach((t) => t.stop())
     }
-  }, [testMode, roomCode])
+  }, [testMode, roomCode, selMic, selCam, retryTick])
 
   const toggleMic = () => {
     const next = !micOn
@@ -181,6 +229,57 @@ export function PreJoin({ roomCode, testMode, joinError, onBack, onJoin }: PreJo
             </div>
           )}
         </div>
+
+        {/* Permission problem + retry — denial is a flow, not a dead end. */}
+        {mediaNotice && (
+          <div className="flex items-start justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-[12px] font-medium leading-relaxed text-amber-900">
+            <span>{mediaNotice}</span>
+            <button
+              type="button"
+              onClick={() => {
+                setMode('loading')
+                setRetryTick((t) => t + 1)
+              }}
+              className="shrink-0 rounded-lg bg-amber-900 px-2.5 py-1 text-[11px] font-bold text-white active:scale-95"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
+        {/* Device pickers (labels appear once permission is granted). */}
+        {(mics.length > 1 || cams.length > 1) && (
+          <div className="flex flex-col gap-2">
+            {mics.length > 1 && (
+              <label className="flex items-center gap-2 text-[12px] font-semibold text-[#7c7c82]">
+                <Mic className="h-3.5 w-3.5 shrink-0" />
+                <select
+                  value={selMic}
+                  onChange={(e) => setSelMic(e.target.value)}
+                  className="w-full rounded-lg border border-black/10 bg-white px-2 py-1.5 text-[12px] font-medium text-[#0d0d0f]"
+                >
+                  {mics.map((d) => (
+                    <option key={d.deviceId} value={d.deviceId}>{d.label}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {cams.length > 1 && (
+              <label className="flex items-center gap-2 text-[12px] font-semibold text-[#7c7c82]">
+                <Video className="h-3.5 w-3.5 shrink-0" />
+                <select
+                  value={selCam}
+                  onChange={(e) => setSelCam(e.target.value)}
+                  className="w-full rounded-lg border border-black/10 bg-white px-2 py-1.5 text-[12px] font-medium text-[#0d0d0f]"
+                >
+                  {cams.map((d) => (
+                    <option key={d.deviceId} value={d.deviceId}>{d.label}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </div>
+        )}
 
         {joinError && (
           <div

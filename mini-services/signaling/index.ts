@@ -58,6 +58,30 @@ const infoServer = createHttpServer((req: IncomingMessage, res: ServerResponse) 
   )
 })
 
+/** engine.io allowRequest — fail-closed Origin check on WS upgrades
+ *  (duplicated from src/lib/relay-server.ts; this service ships standalone). */
+function originGuard(
+  req: { headers: Record<string, string | string[] | undefined> },
+  cb: (err: string | null | undefined, ok: boolean) => void,
+): void {
+  const allowlist = (process.env.ORIGIN ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  const origin = req.headers.origin
+  if (!origin || typeof origin !== 'string') return cb(null, true)
+  let originHost = ''
+  try {
+    originHost = new URL(origin).host
+  } catch {
+    return cb(null, false)
+  }
+  const host = typeof req.headers.host === 'string' ? req.headers.host : ''
+  if (originHost === host) return cb(null, true)
+  if (allowlist.includes(origin)) return cb(null, true)
+  cb(null, false)
+}
+
 const httpServer = createHttpServer()
 
 const io = new Server(httpServer, {
@@ -65,6 +89,9 @@ const io = new Server(httpServer, {
   // gateway routes by the XTransformPort query parameter and keeps '/'.
   path: SOCKET_PATH,
   cors: { origin: (process.env.ORIGIN ?? '*').split(',').map((s) => s.trim()), methods: ['GET', 'POST'] },
+  // Origin gate on the WS upgrade (same rationale as src/lib/relay-server.ts):
+  // fail closed — same-origin always, cross-origin only via the ORIGIN list.
+  allowRequest: originGuard(),
   pingTimeout: 45000,
   pingInterval: 20000,
   // Keep the socket payload tiny; websocket transport only after handshake
