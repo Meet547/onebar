@@ -44,6 +44,21 @@ and nothing static is exposed.
 
 ---
 
+## Vercel deployment
+
+The production Vercel project serves the Next.js app and its signaling WebSocket
+at `/api/signal`. Room state and cross-instance events use the connected Upstash
+Redis resource (`REDIS_URL`); `/api/room-info` reads from the same store. Keep
+that integration connected for production, preview, and development. Vercel
+WebSocket functions have a bounded lifetime, so the browser reconnects and
+rejoins the room when a connection is recycled.
+
+The project does not include a TURN relay. `/api/ice` therefore advertises
+STUN only until `TURN_URLS` and valid TURN credentials are configured. Direct
+peer-to-peer calls can work without TURN, but users on strict or symmetric NATs
+may need a managed TURN provider. The Docker deployment below includes the
+coturn setup for teams that want to host that relay themselves.
+
 ## What you need
 
 | Thing | Notes |

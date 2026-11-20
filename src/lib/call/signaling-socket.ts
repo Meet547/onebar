@@ -10,6 +10,7 @@ export class SignalingSocket {
   private acknowledgements = new Map<number, (value: any) => void>()
   private nextAck = 1
   private retryTimer: ReturnType<typeof setTimeout> | undefined
+  private heartbeatTimer: ReturnType<typeof setInterval> | undefined
   private retryDelay = 1000
   private manuallyClosed = false
   connected = false
@@ -31,6 +32,8 @@ export class SignalingSocket {
             this.id = packet.data?.id
             this.connected = true
             this.dispatch('connect')
+            if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
+            this.heartbeatTimer = setInterval(() => this.emit('relay:heartbeat', {}, () => {}), 20_000)
             return
           }
           if (packet.event === 'ack' && typeof packet.ackId === 'number') {
@@ -49,6 +52,8 @@ export class SignalingSocket {
         const wasConnected = this.connected
         this.connected = false
         this.id = undefined
+        if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
+        this.heartbeatTimer = undefined
         if (wasConnected) this.dispatch('disconnect')
         this.acknowledgements.clear()
         if (!this.manuallyClosed) {
@@ -96,6 +101,7 @@ export class SignalingSocket {
   disconnect() {
     this.manuallyClosed = true
     if (this.retryTimer) clearTimeout(this.retryTimer)
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
     this.acknowledgements.clear()
     this.ws?.close(1000, 'client disconnect')
     this.connected = false

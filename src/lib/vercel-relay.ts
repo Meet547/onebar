@@ -3,7 +3,8 @@ import type { WebSocket } from '@vercel/functions'
 import { resolvePicoVersion } from './server-version'
 import { versionMismatch } from './version'
 
-type Peer = { id: string; name: string; micOn: boolean; camOn: boolean; sharing: boolean }
+type Peer = { id: string; name: string; micOn: boolean; camOn: boolean; sharing: boolean; lastSeen: number; rejoinToken: string }
+type PublicPeer = Omit<Peer, 'lastSeen' | 'rejoinToken'>
 type Music = { peerId: string; title: string; streamId: string; playing: boolean; position: number; duration: number }
 type Room = {
   peers: Record<string, Peer>
@@ -26,7 +27,8 @@ const joinFails = new Map<string, { count: number; blockedUntil: number }>()
 
 const blankRoom = (): Room => ({ peers: {}, hostId: null, locked: false, passwordHash: '', music: null, recentTokens: {} })
 const safe = (value: unknown, max: number) => typeof value === 'string' ? value.slice(0, max) : ''
-const listPeers = (room: Room) => Object.values(room.peers)
+const publicPeer = ({ lastSeen: _lastSeen, rejoinToken: _rejoinToken, ...peer }: Peer): PublicPeer => peer
+const listPeers = (room: Room): PublicPeer[] => Object.values(room.peers).map(publicPeer)
 
 function allowed(key: string, max: number, windowMs: number): boolean {
   const now = Date.now()
@@ -155,17 +157,36 @@ async function onEvent(client: Client, message: { event?: unknown; data?: unknow
     if (failures && Date.now() < failures.blockedUntil) { ack({ ok: false, reason: 'Too many attempts — wait a minute and try again' }); return }
     if (client.roomId && client.roomId !== roomId) await leave(client)
     const outcome = await mutateRoom(roomId, (room) => {
+      const now = Date.now()
+      const removedIds: string[] = []
+      for (const [id, existing] of Object.entries(room.peers)) {
+        const isRejoin = !!rejoinToken && existing.rejoinToken === rejoinToken
+        const isStale = typeof existing.lastSeen === 'number' && now - existing.lastSeen > 65_000
+        if ((isRejoin || isStale) && id !== client.id) {
+          delete room.peers[id]
+          removedIds.push(id)
+        }
+      }
+      const priorHostId = room.hostId
+      if (room.hostId && removedIds.includes(room.hostId)) room.hostId = Object.keys(room.peers)[0] ?? null
+      const stoppedMusicPeerId = room.music && removedIds.includes(room.music.peerId) ? room.music.peerId : null
+      if (stoppedMusicPeerId) room.music = null
+      if (Object.keys(room.peers).length === 0 && removedIds.length > 0) {
+        room.hostId = null
+        room.locked = false
+        room.passwordHash = ''
+      }
       const fresh = Object.keys(room.peers).length === 0 && !room.passwordHash
       if (fresh && passwordHash) room.passwordHash = passwordHash
       if (room.passwordHash && passwordHash !== room.passwordHash) return { ok: false as const, reason: 'Wrong passcode' }
       const recent = rejoinToken && room.recentTokens[rejoinToken] && Date.now() - room.recentTokens[rejoinToken] < REJOIN_GRACE_MS
       if (room.locked && !room.peers[client.id] && !recent) return { ok: false as const, reason: 'The host locked this call' }
       if (Object.keys(room.peers).length >= MAX_PEERS && !room.peers[client.id]) return { ok: false as const, reason: `Room is full (${MAX_PEERS} people max)` }
-      const peer: Peer = { id: client.id, name, micOn: true, camOn: true, sharing: false }
+      const peer: Peer = { id: client.id, name, micOn: true, camOn: true, sharing: false, lastSeen: now, rejoinToken }
       room.peers[client.id] = peer
       if (!room.hostId) room.hostId = client.id
       if (rejoinToken) delete room.recentTokens[rejoinToken]
-      return { ok: true as const, peer, peers: listPeers(room), hostId: room.hostId, locked: room.locked, hasPassword: !!room.passwordHash, music: room.music }
+      return { ok: true as const, peer: publicPeer(peer), peers: listPeers(room), hostId: room.hostId, locked: room.locked, hasPassword: !!room.passwordHash, music: room.music, removedIds, hostChanged: priorHostId !== room.hostId, stoppedMusicPeerId }
     })
     if (!outcome.ok) {
       if (outcome.reason === 'Wrong passcode') {
@@ -179,6 +200,9 @@ async function onEvent(client: Client, message: { event?: unknown; data?: unknow
     client.roomId = roomId
     client.data.rejoinToken = rejoinToken
     ack({ ok: true, self: outcome.peer, peers: outcome.peers, hostId: outcome.hostId, locked: outcome.locked, hasPassword: outcome.hasPassword, music: outcome.music })
+    for (const peerId of outcome.removedIds) await publish({ roomId, exceptId: peerId, event: 'peer:left', data: { peerId } })
+    if (outcome.stoppedMusicPeerId) await publish({ roomId, event: 'music:state', data: { action: 'stop', peerId: outcome.stoppedMusicPeerId } })
+    if (outcome.hostChanged && outcome.hostId) await publish({ roomId, event: 'host:changed', data: { hostId: outcome.hostId } })
     await publish({ roomId, exceptId: client.id, event: 'peer:joined', data: { peer: outcome.peer } })
     await publish({ roomId, event: 'room:peers', data: { peers: outcome.peers, hostId: outcome.hostId } })
     return
@@ -186,12 +210,45 @@ async function onEvent(client: Client, message: { event?: unknown; data?: unknow
 
   const roomId = client.roomId
   if (event === 'room:leave') { await leave(client); ack({ ok: true }); return }
+  if (event === 'relay:heartbeat') {
+    if (!roomId || !allowed(`${client.id}:heartbeat`, 8, 60_000)) { ack({ ok: false }); return }
+    const result = await mutateRoom(roomId, (room) => {
+      const self = room.peers[client.id]
+      if (!self) return null
+      const now = Date.now()
+      self.lastSeen = now
+      const removedIds: string[] = []
+      for (const [id, peer] of Object.entries(room.peers)) {
+        if (id !== client.id && typeof peer.lastSeen === 'number' && now - peer.lastSeen > 65_000) {
+          delete room.peers[id]
+          removedIds.push(id)
+        }
+      }
+      const priorHostId = room.hostId
+      if (room.hostId && removedIds.includes(room.hostId)) room.hostId = Object.keys(room.peers)[0] ?? null
+      const stoppedMusicPeerId = room.music && removedIds.includes(room.music.peerId) ? room.music.peerId : null
+      if (stoppedMusicPeerId) room.music = null
+      return { removedIds, peers: listPeers(room), hostId: room.hostId, hostChanged: priorHostId !== room.hostId, stoppedMusicPeerId }
+    }, true)
+    if (!result) {
+      send(client, 'room:rejoin-required')
+      ack({ ok: false })
+      return
+    }
+    for (const peerId of result.removedIds) await publish({ roomId, exceptId: peerId, event: 'peer:left', data: { peerId } })
+    if (result.stoppedMusicPeerId) await publish({ roomId, event: 'music:state', data: { action: 'stop', peerId: result.stoppedMusicPeerId } })
+    if (result.hostChanged && result.hostId) await publish({ roomId, event: 'host:changed', data: { hostId: result.hostId } })
+    if (result.removedIds.length) await publish({ roomId, event: 'room:peers', data: { peers: result.peers, hostId: result.hostId } })
+    ack({ ok: true })
+    return
+  }
   if (!roomId) return
   if (event === 'state:update') {
     if (!allowed(`${client.id}:state`, 60, 10_000)) return
     const peer = await mutateRoom(roomId, (room) => {
       const p = room.peers[client.id]
       if (!p) return null
+      p.lastSeen = Date.now()
       if (typeof data.micOn === 'boolean') p.micOn = data.micOn
       if (typeof data.camOn === 'boolean') p.camOn = data.camOn
       if (typeof data.sharing === 'boolean') p.sharing = data.sharing

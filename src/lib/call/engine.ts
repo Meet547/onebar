@@ -429,6 +429,9 @@ export class CallEngine {
     })
     socket.on('disconnect', () => useCallStore.getState().setSignalingConnected(false))
     socket.on('connect_error', () => useCallStore.getState().setSignalingConnected(false))
+    socket.on('room:rejoin-required', () => {
+      if (this.myId) this.rejoin()
+    })
 
     // Gate on the first real connect. The temporary listeners are removed
     // once settled so they can never kill socket.io's own reconnection loop
