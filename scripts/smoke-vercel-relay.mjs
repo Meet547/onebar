@@ -91,6 +91,7 @@ try {
 
   console.log(`PASS: websocket joins, room presence, chat, room info, and RTC relay (${base.origin})`)
 } finally {
+  await Promise.all([first.emit('room:leave', undefined, true), second.emit('room:leave', undefined, true)])
   first.ws.close()
   second.ws.close()
 }

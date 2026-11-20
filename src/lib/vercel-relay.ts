@@ -185,7 +185,7 @@ async function onEvent(client: Client, message: { event?: unknown; data?: unknow
   }
 
   const roomId = client.roomId
-  if (event === 'room:leave') { await leave(client); return }
+  if (event === 'room:leave') { await leave(client); ack({ ok: true }); return }
   if (!roomId) return
   if (event === 'state:update') {
     if (!allowed(`${client.id}:state`, 60, 10_000)) return

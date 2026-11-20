@@ -2618,13 +2618,32 @@ export class CallEngine {
   }
 
   async leave(silent = false) {
+    const activeSocket = this.socket
+    let waitForRoomLeave: Promise<void> | null = null
+    if (activeSocket) {
+      if (SIGNALING_TRANSPORT === 'vercel-ws' && activeSocket.connected) {
+        waitForRoomLeave = new Promise((resolve) => {
+          let settled = false
+          let timeout = 0
+          const finish = () => {
+            if (settled) return
+            settled = true
+            window.clearTimeout(timeout)
+            resolve()
+          }
+          timeout = window.setTimeout(finish, 800)
+          activeSocket.emit('room:leave', finish)
+        })
+      } else {
+        activeSocket.emit('room:leave')
+      }
+    }
     if (this.statsTimer !== null) {
       window.clearInterval(this.statsTimer)
       this.statsTimer = null
     }
     this.stopMusicShare()
     void this.loadMusic().then((m) => m.detachRemoteMusic())
-    this.socket?.emit('room:leave')
     for (const peerId of Array.from(this.pcs.keys())) this.dropPeer(peerId)
     this.screenTrack?.stop()
     this.localStream?.getTracks().forEach((t) => {
@@ -2656,7 +2675,8 @@ export class CallEngine {
     this.unbindNetwork?.()
     this.unbindNetwork = null
     this.captureShrunk = false
-    this.socket?.disconnect()
+    if (waitForRoomLeave) await waitForRoomLeave
+    activeSocket?.disconnect()
     this.socket = null
     this.myId = ''
     this.started = false
