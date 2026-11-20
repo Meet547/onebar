@@ -2483,7 +2483,7 @@ export class CallEngine {
       this.sendQuality({
         level: overall,
         bweKbps: weakestBwe !== null ? Math.round(weakestBwe / 1000) : null,
-        budgetKbps: Math.round(debugShare),
+        budgetKbps: Math.round(debugShare / 1000),
         lossPct: worstLossPct,
         rttMs: worstRttMs,
         cpuReason: worstReason,

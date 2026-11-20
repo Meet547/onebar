@@ -89,7 +89,11 @@ try {
  await restricted.getByRole('button',{name:'Leave call',exact:true}).waitFor()
  assert.equal(await restricted.evaluate(()=>window.__pico.engine.localStream.getTracks().every(t=>t.readyState==='live')),true)
  await restricted.getByRole('button',{name:'Leave call',exact:true}).click()
- await audit(restricted,'storage blocked mobile prejoin')
+ await restricted.waitForFunction(()=>{
+  const button=[...document.querySelectorAll('button')].find((item)=>item.textContent?.includes('Join call'))
+  return !!button && !button.disabled
+ })
+ await audit(restricted,'storage blocked mobile rejoin screen')
  report.checks.push('restricted browser storage permits join')
  const denied=await pageFor()
  await denied.addInitScript(()=>{navigator.mediaDevices.getUserMedia=async()=>{throw new DOMException('denied','NotAllowedError')}})

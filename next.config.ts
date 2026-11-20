@@ -81,7 +81,7 @@ const nextConfig: NextConfig = {
   // rewrite match directly.
   skipTrailingSlashRedirect: true,
   reactStrictMode: false,
-  allowedDevOrigins: ["*.space-z.ai"],
+  allowedDevOrigins: ["*.space-z.ai", "127.0.0.1"],
   async headers() {
     return [
       { source: "/sw.js", headers: [{ key: "Cache-Control", value: "no-cache, no-store, must-revalidate" }] },
