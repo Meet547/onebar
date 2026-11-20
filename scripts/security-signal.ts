@@ -31,8 +31,9 @@ try {
  }
  await delay(500)
  ok('cross-room and unjoined signaling blocked',injected.length===0)
- const left=new Promise<void>(resolve=>a.once('peer:left',()=>resolve()))
- b.disconnect();await left
+ const memberId=b.id
+ const reconnecting=new Promise<any>(resolve=>a.once('peer:reconnecting',resolve))
+ b.disconnect();assert.equal((await reconnecting).peer.id,memberId,'unexpected socket close should preserve peer during reconnect grace')
  const locked=new Promise<void>(resolve=>a.once('room:locked',()=>resolve()))
  a.emit('host:lock',{locked:true});await locked
  const impersonator=await connect()

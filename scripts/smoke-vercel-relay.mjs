@@ -2,6 +2,7 @@
 
 const base = new URL(process.argv[2] || process.env.SITE_URL || 'https://onebar-teal.vercel.app')
 const room = `smoke-${crypto.randomUUID().slice(0, 12)}`
+const firstRejoinToken = `smoke-token-${crypto.randomUUID()}`
 const httpBase = new URL(base)
 httpBase.protocol = base.protocol === 'https:' ? 'https:' : 'http:'
 
@@ -59,14 +60,14 @@ function client() {
   }
 }
 
-const first = client()
+let first = client()
 const second = client()
 try {
   const firstConnected = first.once('connect')
   const secondConnected = second.once('connect')
   await Promise.all([firstConnected, secondConnected])
 
-  const firstJoin = await first.emit('room:join', { roomId: room, name: 'Smoke Alice' }, true)
+  const firstJoin = await first.emit('room:join', { roomId: room, name: 'Smoke Alice', rejoinToken: firstRejoinToken }, true)
   if (!firstJoin.ok) throw new Error(`first join failed: ${firstJoin.reason}`)
 
   const peerJoined = first.once('peer:joined')
@@ -74,6 +75,23 @@ try {
   if (!secondJoin.ok || secondJoin.peers?.length !== 2) throw new Error('second join did not see both room peers')
   const joined = await peerJoined
   if (joined.peer.id !== secondJoin.self.id) throw new Error('peer join event did not reach the other client')
+
+  // A brief signaling transport outage must preserve membership and let the
+  // same participant resume without telling the other caller they left.
+  const reconnecting = second.once('peer:reconnecting')
+  first.ws.close()
+  const dropped = await reconnecting
+  if (dropped.peer?.id !== firstJoin.self.id) throw new Error('disconnect did not enter reconnect grace')
+  const duringReconnect = await fetch(new URL(`/api/room-info?room=${encodeURIComponent(room)}`, httpBase), { cache: 'no-store' }).then((r) => r.json())
+  if (duringReconnect.count !== 2) throw new Error(`transient disconnect removed room presence: ${JSON.stringify(duringReconnect)}`)
+  first = client()
+  const firstReconnected = first.once('connect')
+  await firstReconnected
+  const peerReconnected = second.once('peer:reconnected')
+  const resumed = await first.emit('room:join', { roomId: room, name: 'Smoke Alice', rejoinToken: firstRejoinToken }, true)
+  if (!resumed.ok) throw new Error(`rejoin failed: ${resumed.reason}`)
+  const resumeEvent = await peerReconnected
+  if (resumeEvent.oldPeerId !== firstJoin.self.id || resumeEvent.peer.id !== resumed.self.id) throw new Error('rejoin did not replace the stale peer cleanly')
 
   const chat = second.once('chat:message')
   await first.emit('chat:message', { text: 'cross-client signaling smoke' })
@@ -87,9 +105,9 @@ try {
   const offer = second.once('rtc:offer')
   await first.emit('rtc:offer', { to: secondJoin.self.id, sdp: 'smoke-sdp' })
   const relayedOffer = await offer
-  if (relayedOffer.from !== firstJoin.self.id || relayedOffer.sdp !== 'smoke-sdp') throw new Error('direct RTC signaling was not relayed')
+  if (relayedOffer.from !== resumed.self.id || relayedOffer.sdp !== 'smoke-sdp') throw new Error('direct RTC signaling was not relayed')
 
-  console.log(`PASS: websocket joins, room presence, chat, room info, and RTC relay (${base.origin})`)
+  console.log(`PASS: websocket joins, reconnect grace/rejoin, room presence, chat, room info, and RTC relay (${base.origin})`)
 } finally {
   await Promise.all([first.emit('room:leave', undefined, true), second.emit('room:leave', undefined, true)])
   first.ws.close()

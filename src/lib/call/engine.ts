@@ -622,6 +622,24 @@ export class CallEngine {
       })
     })
     socket.on('peer:left', ({ peerId }: { peerId: string }) => this.dropPeer(peerId))
+    socket.on('peer:reconnecting', ({ peer }: { peer: { id: string; name: string } }) => {
+      if (!peer?.id) return
+      useCallStore.getState().patchPeer(peer.id, { connecting: true })
+      useCallStore.getState().addChat({
+        id: `sys-reconnecting-${peer.id}-${Date.now()}`,
+        from: 'system', name: 'System', text: `${peer.name} lost connection. Waiting for them to reconnect…`,
+        ts: Date.now(), system: true,
+      })
+    })
+    socket.on('peer:reconnected', ({ oldPeerId, peer }: { oldPeerId: string; peer: { id: string; name: string; micOn: boolean; camOn: boolean; sharing: boolean } }) => {
+      if (!peer?.id) return
+      if (oldPeerId) this.dropPeer(oldPeerId)
+      this.ensurePeer(peer.id, peer.name, peer.micOn, peer.camOn, peer.sharing)
+      useCallStore.getState().addChat({
+        id: `sys-reconnected-${peer.id}-${Date.now()}`,
+        from: 'system', name: 'System', text: `${peer.name} reconnected`, ts: Date.now(), system: true,
+      })
+    })
     socket.on('room:peers', ({ peers }: { peers: Array<{ id: string; name: string; micOn: boolean; camOn: boolean; sharing: boolean }> }) => {
       // Only meaningful after a reconnect — reconcile full presence
       if (this.myId) this.reconcilePeers(peers)
@@ -2018,7 +2036,13 @@ export class CallEngine {
   }
 
   private async collectStats() {
-    if (this.pcs.size === 0) return
+    if (this.pcs.size === 0) {
+      useCallStore.getState().setLiveDiagnostics({
+        rttMs: null, lossPct: null, sendKbps: 0, receiveKbps: 0,
+        encodeMsPerFrame: null, cpuLimited: false, connectedPeers: 0, reconnectingPeers: 0,
+      })
+      return
+    }
     this.pollTick++
 
     // Signaling watchdog: an offer left hanging for 9s+ (a rare race between
@@ -2036,6 +2060,7 @@ export class CallEngine {
      *  never downgrade the media of everyone already talking. */
     let connectedLevel: NetworkLevel | null = null
     let connectedCount = 0
+    let receiveKbps = 0
     let weakCount = 0
     let totalKbps = 0
     const nextPrev = new Map<string, number>()
@@ -2069,9 +2094,8 @@ export class CallEngine {
       const storePeer = useCallStore.getState().peers[peerId]
 
       if (pc.connectionState !== 'connected') {
-        // Not connected is NOT "weak" — it is "still dialing" (or re-dialing).
-        // Level 0 keeps the bars honest; the tile shows "Connecting…".
-        overall = Math.min(overall, 0) as NetworkLevel
+        // A dialing/reconnecting PC has no measured link quality. Do not let
+        // an unmeasured peer force the whole call into the weak profile.
         if (storePeer && storePeer.connecting !== true) {
           useCallStore.getState().patchPeer(peerId, { connecting: true })
         }
@@ -2236,6 +2260,7 @@ export class CallEngine {
       if (level <= 1) weakCount++
       overall = Math.min(overall, level) as NetworkLevel
       totalKbps += sentKbps
+      receiveKbps += (inboundDelta * 8) / (STATS_INTERVAL_MS * 1000)
 
       // One-way media watchdog: the DTLS association is up, the peer claims
       // to send, yet not a single byte arrived for ~15 s — the classic
@@ -2312,6 +2337,10 @@ export class CallEngine {
     this.prevBytes = nextPrev
     this.prevInbound = nextPrevIn
     this.prevEncode = nextPrevEncode
+
+    // Aggregate only measured, connected links. During initial connection or
+    // recovery, preserve the last real rating until a fresh sample arrives.
+    overall = connectedLevel ?? useCallStore.getState().overallLevel
 
     /* ---- Upload budget (task 4, via adaptive.splitBudget): 0.8 × the
        weakest smoothed BWE across connected links, audio reserved first, the
@@ -2422,6 +2451,16 @@ export class CallEngine {
       useCallStore.getState().patchPeer(this.myId, { level: overall })
     }
     useCallStore.setState({ bitrateKbps: Math.round(totalKbps) })
+    useCallStore.getState().setLiveDiagnostics({
+      rttMs: worstRttMs,
+      lossPct: worstLossPct,
+      sendKbps: Math.round(totalKbps),
+      receiveKbps: Math.round(receiveKbps),
+      encodeMsPerFrame: worstEncodeMs > 0 ? Math.round(worstEncodeMs * 10) / 10 : null,
+      cpuLimited: worstReason === 'cpu',
+      connectedPeers: connectedCount,
+      reconnectingPeers: [...this.pcs.values()].filter((pc) => pc.connectionState !== 'connected').length,
+    })
 
     // Music quality follows the network instead of fighting it
     if (this.musicSource) this.applyMusicBitrate(overall)

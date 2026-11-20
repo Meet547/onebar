@@ -57,6 +57,18 @@ export interface DebugInfo {
   events: string[]
 }
 
+/** Small, privacy-safe live transport snapshot shown during calls. */
+export interface LiveDiagnostics {
+  rttMs: number | null
+  lossPct: number | null
+  sendKbps: number
+  receiveKbps: number
+  encodeMsPerFrame: number | null
+  cpuLimited: boolean
+  connectedPeers: number
+  reconnectingPeers: number
+}
+
 interface CallStore {
   signalingConnected: boolean
   self: SelfState
@@ -85,6 +97,7 @@ interface CallStore {
   liteAuto: boolean
   /** Debug overlay snapshot, only when ?debug=1. */
   debug: DebugInfo | null
+  liveDiagnostics: LiveDiagnostics
 
   setSignalingConnected: (v: boolean) => void
   setSelf: (partial: Partial<SelfState>) => void
@@ -108,6 +121,7 @@ interface CallStore {
   setMusic: (partial: Partial<MusicState>) => void
   setLite: (v: boolean, auto?: boolean) => void
   setDebug: (d: DebugInfo | null) => void
+  setLiveDiagnostics: (d: LiveDiagnostics) => void
   /** Human-readable media problem ("mic blocked", "no camera", …) set by the
    *  engine / pre-join screen; null = healthy. Drives the retry banner. */
   mediaNotice: string | null
@@ -137,6 +151,7 @@ export const useCallStore = create<CallStore>((set, get) => ({
   lite: false,
   liteAuto: false,
   debug: null,
+  liveDiagnostics: { rttMs: null, lossPct: null, sendKbps: 0, receiveKbps: 0, encodeMsPerFrame: null, cpuLimited: false, connectedPeers: 0, reconnectingPeers: 0 },
 
   setSignalingConnected: (v) => set({ signalingConnected: v }),
   setSelf: (partial) => set((s) => ({ self: { ...s.self, ...partial } })),
@@ -194,6 +209,7 @@ export const useCallStore = create<CallStore>((set, get) => ({
   setMusic: (partial) => set((s) => ({ music: { ...s.music, ...partial } })),
   setLite: (v, auto = false) => set({ lite: v, liteAuto: auto }),
   setDebug: (d) => set({ debug: d }),
+  setLiveDiagnostics: (d) => set({ liveDiagnostics: d }),
   mediaNotice: null,
   setMediaNotice: (v) => set({ mediaNotice: v }),
   reset: () =>
@@ -213,6 +229,7 @@ export const useCallStore = create<CallStore>((set, get) => ({
       kicked: false,
       music: INITIAL_MUSIC,
       debug: null,
+      liveDiagnostics: { rttMs: null, lossPct: null, sendKbps: 0, receiveKbps: 0, encodeMsPerFrame: null, cpuLimited: false, connectedPeers: 0, reconnectingPeers: 0 },
       mediaNotice: null,
     }),
 }))

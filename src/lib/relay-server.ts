@@ -53,6 +53,7 @@ export const RELAY_INFO_PORT = Number(process.env.RELAY_INFO_PORT ?? 3004)
 const SOCKET_PATH = process.env.SOCKET_PATH ?? '/'
 const MAX_PEERS_PER_ROOM = 10
 const REJOIN_GRACE_MS = 120_000
+const DISCONNECT_GRACE_MS = 30_000
 
 // ---------------- data model ----------------
 
@@ -62,6 +63,7 @@ interface Peer {
   micOn: boolean
   camOn: boolean
   sharing: boolean
+  reconnecting?: boolean
 }
 
 interface ChatMessage {
@@ -95,6 +97,7 @@ interface Room {
 }
 
 const rooms = new Map<string, Room>()
+const peerRejoinTokens = new Map<string, string>()
 
 const getRoom = (roomId: string): Room => {
   let room = rooms.get(roomId)
@@ -352,7 +355,10 @@ function attachRelay(httpServer: ReturnType<typeof createHttpServer>): IoServer 
           return
         }
 
-        if (room.peers.size >= MAX_PEERS_PER_ROOM && !room.peers.has(socket.id)) {
+        const previousPeer = rejoinToken
+          ? Array.from(room.peers.values()).find((existing) => existing.id !== socket.id && peerRejoinTokens.get(existing.id) === rejoinToken)
+          : undefined
+        if (room.peers.size - (previousPeer ? 1 : 0) >= MAX_PEERS_PER_ROOM && !room.peers.has(socket.id)) {
           ack?.({ ok: false, reason: `Room is full (${MAX_PEERS_PER_ROOM} people max)` })
           return
         }
@@ -364,7 +370,15 @@ function attachRelay(httpServer: ReturnType<typeof createHttpServer>): IoServer 
 
         currentRoom = roomId
       socket.data.rejoinToken = rejoinToken
-        peer = { id: socket.id, name, micOn: true, camOn: true, sharing: false }
+        if (previousPeer) {
+          room.peers.delete(previousPeer.id)
+          peerRejoinTokens.delete(previousPeer.id)
+          room.recentTokens.delete(rejoinToken)
+          if (room.hostId === previousPeer.id) room.hostId = socket.id
+          if (room.music?.peerId === previousPeer.id) room.music.peerId = socket.id
+        }
+        peer = { id: socket.id, name: previousPeer?.name ?? name, micOn: previousPeer?.micOn ?? true, camOn: previousPeer?.camOn ?? true, sharing: previousPeer?.sharing ?? false }
+        if (rejoinToken) peerRejoinTokens.set(socket.id, rejoinToken)
         room.peers.set(socket.id, peer)
         if (!room.hostId) room.hostId = socket.id
         socket.join(roomId)
@@ -387,7 +401,8 @@ function attachRelay(httpServer: ReturnType<typeof createHttpServer>): IoServer 
               }
             : null,
         })
-        socket.to(roomId).emit('peer:joined', { peer })
+        if (previousPeer) socket.to(roomId).emit('peer:reconnected', { oldPeerId: previousPeer.id, peer })
+        else socket.to(roomId).emit('peer:joined', { peer })
         broadcastPresence(roomId)
       } catch {
         ack?.({ ok: false, reason: 'Could not join the room' })
@@ -409,6 +424,7 @@ function attachRelay(httpServer: ReturnType<typeof createHttpServer>): IoServer 
       }
       if (room) {
         room.peers.delete(socket.id)
+        peerRejoinTokens.delete(socket.id)
         if (socket.data.rejoinToken) {
           room.recentTokens.set(socket.data.rejoinToken, Date.now())
           if (room.recentTokens.size > 100) {
@@ -493,6 +509,7 @@ function attachRelay(httpServer: ReturnType<typeof createHttpServer>): IoServer 
       const kickedPeer = room.peers.get(target)
       if (targetSocket?.data.rejoinToken) room.recentTokens.delete(targetSocket.data.rejoinToken)
       room.peers.delete(target)
+      peerRejoinTokens.delete(target)
       if (room.music?.peerId === target) {
         room.music = null
         io.to(currentRoom).emit('music:state', { action: 'stop', peerId: target })
@@ -643,7 +660,32 @@ function attachRelay(httpServer: ReturnType<typeof createHttpServer>): IoServer 
     })
 
     socket.on('disconnect', () => {
-      leaveRoom()
+      if (socket.data.kicked) leaveRoom()
+      if (currentRoom && peer && !socket.data.kicked) {
+        const roomId = currentRoom
+        const room = rooms.get(roomId)
+        const current = room?.peers.get(socket.id)
+        if (current) current.reconnecting = true
+        if (room && socket.data.rejoinToken) room.recentTokens.set(socket.data.rejoinToken, Date.now())
+        socket.to(roomId).emit('peer:reconnecting', { peer: current ?? peer, graceMs: DISCONNECT_GRACE_MS })
+        setTimeout(() => {
+          const room = rooms.get(roomId)
+          const old = room?.peers.get(socket.id)
+          if (!room || !old?.reconnecting) return
+          room.peers.delete(socket.id)
+          peerRejoinTokens.delete(socket.id)
+          if (room.music?.peerId === socket.id) {
+            room.music = null
+            io.to(roomId).emit('music:state', { action: 'stop', peerId: socket.id })
+          }
+          if (room.peers.size === 0) rooms.delete(roomId)
+          else {
+            socket.to(roomId).emit('peer:left', { peerId: socket.id })
+            promoteHostIfNeeded(roomId)
+            broadcastPresence(roomId)
+          }
+        }, DISCONNECT_GRACE_MS).unref?.()
+      }
       for (const key of buckets.keys()) {
         if (key.startsWith(socket.id + ':')) buckets.delete(key)
       }

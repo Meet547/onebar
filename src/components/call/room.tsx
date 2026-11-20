@@ -238,6 +238,7 @@ export function Room({ roomCode, onLeave }: { roomCode: string; onLeave: () => v
   const self = useCallStore((s) => s.self)
   const unread = useCallStore((s) => s.unreadChat)
   const overall = useCallStore((s) => s.overallLevel)
+  const liveDiagnostics = useCallStore((s) => s.liveDiagnostics)
   const signaling = useCallStore((s) => s.signalingConnected)
   const peerCount = useCallStore((s) => Object.keys(s.peers).length)
   const music = useCallStore((s) => s.music)
@@ -430,6 +431,23 @@ export function Room({ roomCode, onLeave }: { roomCode: string; onLeave: () => v
             <span className="truncate font-mono text-[12px] font-medium text-[#0d0d0f]">{roomCode}</span>
             <span className="text-[11px] font-bold uppercase tracking-wide text-[#62626a]">Copy</span>
           </button>
+          <div
+            role="status"
+            aria-live="polite"
+            title="Live WebRTC call path metrics. Wi-Fi can be connected while the route to the other caller is congested or blocked. CPU status reflects video encoder pressure, not total device CPU."
+            className="flex min-w-0 items-center gap-2 rounded-md bg-[#f5f5f7] px-2 py-1.5 text-[10px] font-semibold tabular-nums text-[#62626a] sm:gap-2.5 sm:px-2.5 sm:text-[11px]"
+          >
+            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${!signaling || liveDiagnostics.reconnectingPeers > 0 ? 'animate-pulse bg-[#ff9f0a]' : 'bg-[#30d158]'}`} aria-hidden />
+            <span className="whitespace-nowrap">{liveDiagnostics.reconnectingPeers > 0 ? 'Reconnecting' : liveDiagnostics.connectedPeers > 0 ? 'Live' : 'Connecting'}</span>
+            <span className="whitespace-nowrap">Ping {liveDiagnostics.rttMs === null ? '—' : `${liveDiagnostics.rttMs} ms`}</span>
+            <span className="hidden whitespace-nowrap lg:inline">↑{liveDiagnostics.sendKbps} ↓{liveDiagnostics.receiveKbps} kb/s</span>
+            <span className={`hidden whitespace-nowrap md:inline ${liveDiagnostics.cpuLimited ? 'text-[#ff9500]' : ''}`}>
+              {liveDiagnostics.cpuLimited ? 'Encoder limited' : liveDiagnostics.encodeMsPerFrame === null ? 'Encoder —' : `Enc ${liveDiagnostics.encodeMsPerFrame} ms/f`}
+            </span>
+            {liveDiagnostics.lossPct !== null && liveDiagnostics.lossPct > 0 && (
+              <span className="hidden whitespace-nowrap text-[#ff9500] sm:inline">Loss {liveDiagnostics.lossPct}%</span>
+            )}
+          </div>
         </div>
 
         <div className="flex shrink-0 items-center gap-2.5">

@@ -3,8 +3,8 @@ import type { WebSocket } from '@vercel/functions'
 import { resolvePicoVersion } from './server-version'
 import { versionMismatch } from './version'
 
-type Peer = { id: string; name: string; micOn: boolean; camOn: boolean; sharing: boolean; lastSeen: number; rejoinToken: string }
-type PublicPeer = Omit<Peer, 'lastSeen' | 'rejoinToken'>
+type Peer = { id: string; name: string; micOn: boolean; camOn: boolean; sharing: boolean; lastSeen: number; disconnectedAt?: number; rejoinToken: string }
+type PublicPeer = Omit<Peer, 'lastSeen' | 'disconnectedAt' | 'rejoinToken'>
 type Music = { peerId: string; title: string; streamId: string; playing: boolean; position: number; duration: number }
 type Room = {
   peers: Record<string, Peer>
@@ -20,6 +20,8 @@ type WireEvent = { roomId?: string; targetId?: string; exceptId?: string; event:
 const ROOM_TTL_SECONDS = 180
 const MAX_PEERS = 10
 const REJOIN_GRACE_MS = 120_000
+const DISCONNECT_GRACE_MS = 30_000
+const STALE_PEER_MS = 90_000
 const VERSION = resolvePicoVersion()
 const clients = new Map<string, Client>()
 const limits = new Map<string, { count: number; until: number }>()
@@ -27,7 +29,7 @@ const joinFails = new Map<string, { count: number; blockedUntil: number }>()
 
 const blankRoom = (): Room => ({ peers: {}, hostId: null, locked: false, passwordHash: '', music: null, recentTokens: {} })
 const safe = (value: unknown, max: number) => typeof value === 'string' ? value.slice(0, max) : ''
-const publicPeer = ({ lastSeen: _lastSeen, rejoinToken: _rejoinToken, ...peer }: Peer): PublicPeer => peer
+const publicPeer = ({ lastSeen: _lastSeen, disconnectedAt: _disconnectedAt, rejoinToken: _rejoinToken, ...peer }: Peer): PublicPeer => peer
 const listPeers = (room: Room): PublicPeer[] => Object.values(room.peers).map(publicPeer)
 
 function allowed(key: string, max: number, windowMs: number): boolean {
@@ -133,6 +135,22 @@ async function leave(client: Client) {
   await publish({ roomId, event: 'room:peers', data: { peers: result.peers, hostId: result.hostId } })
 }
 
+/** A transient transport close should preserve room presence while the
+ * browser's signaling socket reconnects. Explicit room:leave stays immediate. */
+async function markDisconnected(client: Client) {
+  const roomId = client.roomId
+  if (!roomId) return
+  client.roomId = null
+  const peer = await mutateRoom(roomId, (room) => {
+    const current = room.peers[client.id]
+    if (!current) return null
+    current.disconnectedAt = Date.now()
+    if (current.rejoinToken) room.recentTokens[current.rejoinToken] = Date.now()
+    return publicPeer(current)
+  })
+  if (peer) await publish({ roomId, event: 'peer:reconnecting', data: { peer } })
+}
+
 async function onEvent(client: Client, message: { event?: unknown; data?: unknown; ackId?: unknown }, ip: string) {
   const event = safe(message.event, 40)
   const raw = message.data
@@ -159,12 +177,17 @@ async function onEvent(client: Client, message: { event?: unknown; data?: unknow
     const outcome = await mutateRoom(roomId, (room) => {
       const now = Date.now()
       const removedIds: string[] = []
+      let reconnectedPeer: PublicPeer | null = null
+      let replacedPeer: Peer | null = null
       for (const [id, existing] of Object.entries(room.peers)) {
         const isRejoin = !!rejoinToken && existing.rejoinToken === rejoinToken
-        const isStale = typeof existing.lastSeen === 'number' && now - existing.lastSeen > 65_000
+        const isStale = typeof existing.disconnectedAt === 'number'
+          ? now - existing.disconnectedAt > DISCONNECT_GRACE_MS
+          : typeof existing.lastSeen === 'number' && now - existing.lastSeen > STALE_PEER_MS
         if ((isRejoin || isStale) && id !== client.id) {
+          if (isRejoin) replacedPeer = existing
+          else removedIds.push(id)
           delete room.peers[id]
-          removedIds.push(id)
         }
       }
       const priorHostId = room.hostId
@@ -182,11 +205,17 @@ async function onEvent(client: Client, message: { event?: unknown; data?: unknow
       const recent = rejoinToken && room.recentTokens[rejoinToken] && Date.now() - room.recentTokens[rejoinToken] < REJOIN_GRACE_MS
       if (room.locked && !room.peers[client.id] && !recent) return { ok: false as const, reason: 'The host locked this call' }
       if (Object.keys(room.peers).length >= MAX_PEERS && !room.peers[client.id]) return { ok: false as const, reason: `Room is full (${MAX_PEERS} people max)` }
-      const peer: Peer = { id: client.id, name, micOn: true, camOn: true, sharing: false, lastSeen: now, rejoinToken }
+      const oldPeer = replacedPeer
+      const peer: Peer = { id: client.id, name, micOn: oldPeer?.micOn ?? true, camOn: oldPeer?.camOn ?? true, sharing: oldPeer?.sharing ?? false, lastSeen: now, rejoinToken }
       room.peers[client.id] = peer
+      if (replacedPeer) {
+        if (room.hostId === replacedPeer.id) room.hostId = client.id
+        if (room.music?.peerId === replacedPeer.id) room.music.peerId = client.id
+        reconnectedPeer = publicPeer(peer)
+      }
       if (!room.hostId) room.hostId = client.id
       if (rejoinToken) delete room.recentTokens[rejoinToken]
-      return { ok: true as const, peer: publicPeer(peer), peers: listPeers(room), hostId: room.hostId, locked: room.locked, hasPassword: !!room.passwordHash, music: room.music, removedIds, hostChanged: priorHostId !== room.hostId, stoppedMusicPeerId }
+      return { ok: true as const, peer: publicPeer(peer), peers: listPeers(room), hostId: room.hostId, locked: room.locked, hasPassword: !!room.passwordHash, music: room.music, removedIds, hostChanged: priorHostId !== room.hostId, stoppedMusicPeerId, reconnectedPeer, replacedPeerId: replacedPeer?.id ?? null }
     })
     if (!outcome.ok) {
       if (outcome.reason === 'Wrong passcode') {
@@ -203,7 +232,11 @@ async function onEvent(client: Client, message: { event?: unknown; data?: unknow
     for (const peerId of outcome.removedIds) await publish({ roomId, exceptId: peerId, event: 'peer:left', data: { peerId } })
     if (outcome.stoppedMusicPeerId) await publish({ roomId, event: 'music:state', data: { action: 'stop', peerId: outcome.stoppedMusicPeerId } })
     if (outcome.hostChanged && outcome.hostId) await publish({ roomId, event: 'host:changed', data: { hostId: outcome.hostId } })
-    await publish({ roomId, exceptId: client.id, event: 'peer:joined', data: { peer: outcome.peer } })
+    if (outcome.reconnectedPeer && outcome.replacedPeerId) {
+      await publish({ roomId, exceptId: client.id, event: 'peer:reconnected', data: { oldPeerId: outcome.replacedPeerId, peer: outcome.reconnectedPeer } })
+    } else {
+      await publish({ roomId, exceptId: client.id, event: 'peer:joined', data: { peer: outcome.peer } })
+    }
     await publish({ roomId, event: 'room:peers', data: { peers: outcome.peers, hostId: outcome.hostId } })
     return
   }
@@ -219,7 +252,9 @@ async function onEvent(client: Client, message: { event?: unknown; data?: unknow
       self.lastSeen = now
       const removedIds: string[] = []
       for (const [id, peer] of Object.entries(room.peers)) {
-        if (id !== client.id && typeof peer.lastSeen === 'number' && now - peer.lastSeen > 65_000) {
+        const expiredDisconnect = typeof peer.disconnectedAt === 'number' && now - peer.disconnectedAt > DISCONNECT_GRACE_MS
+        const staleHeartbeat = typeof peer.disconnectedAt !== 'number' && typeof peer.lastSeen === 'number' && now - peer.lastSeen > STALE_PEER_MS
+        if (id !== client.id && (expiredDisconnect || staleHeartbeat)) {
           delete room.peers[id]
           removedIds.push(id)
         }
@@ -382,7 +417,7 @@ export function handleVercelSocket(ws: WebSocket, request: Request) {
     clearInterval(heartbeat)
     clients.delete(client.id)
     for (const key of limits.keys()) if (key.startsWith(`${client.id}:`)) limits.delete(key)
-    void leave(client).catch((error) => console.error('[vercel-relay] disconnect cleanup failed', error))
+    void markDisconnected(client).catch((error) => console.error('[vercel-relay] disconnect cleanup failed', error))
   }
   ws.on('close', close)
   ws.on('error', close)

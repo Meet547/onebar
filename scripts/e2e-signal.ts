@@ -7,6 +7,7 @@ import { io, type Socket } from 'socket.io-client'
 
 const BASE = process.env.BASE || 'http://127.0.0.1:3111'
 const ROOM = `e2e-${Math.random().toString(36).slice(2, 8)}-relay`
+const rejoinToken = `e2e-token-${Math.random().toString(36).slice(2, 10)}`
 
 let pass = 0
 const fails: string[] = []
@@ -56,7 +57,7 @@ async function main() {
 
   // B joins → A sees peer:joined, both see room:peers with 2 peers
   const pjP = onceEvent(A, 'peer:joined')
-  const ackB = await new Promise<any>((res) => B.emit('room:join', { roomId: ROOM, name: 'Bob' }, res))
+  const ackB = await new Promise<any>((res) => B.emit('room:join', { roomId: ROOM, name: 'Bob', rejoinToken }, res))
   ok('B join ack ok:true, peers=2', ackB?.ok === true && ackB?.peers?.length === 2, JSON.stringify(ackB))
   const pj = await pjP
   ok('A received peer:joined(B)', pj?.peer?.id === B.id && pj?.peer?.name === 'Bob', JSON.stringify(pj))
@@ -122,15 +123,27 @@ async function main() {
   ok('locked room rejects C', ackC?.ok === false, JSON.stringify(ackC))
   C.disconnect()
 
-  // B leaves → A sees peer:left and room:peers size 1
-  // (capture the id BEFORE disconnect: socket.io-client clears socket.id)
+  // An unexpected transport close retains membership during the grace period.
   const bid = B.id
-  const plP = onceEvent(A, 'peer:left')
+  const reconnectP = onceEvent(A, 'peer:reconnecting')
   B.disconnect()
+  const reconnecting = await reconnectP
+  ok(`A received reconnecting(B) (B.id=${bid})`, reconnecting?.peer?.id === bid, JSON.stringify(reconnecting))
+  // Rejoin the same participant via its private token, then explicitly leave.
+  const B2 = await connect('B2')
+  const rejoinedP = onceEvent(A, 'peer:reconnected')
+  const ackB2 = await new Promise<any>((res) => B2.emit('room:join', { roomId: ROOM, name: 'Bob', rejoinToken }, res))
+  const rejoined = await rejoinedP
+  ok('same participant rejoined with replacement event', ackB2?.ok === true && rejoined?.oldPeerId === bid, JSON.stringify(rejoined))
+
+  // A deliberate room:leave is immediate and still emits peer:left.
+  const plP = onceEvent(A, 'peer:left')
+  B2.emit('room:leave')
   const pl = await plP
-  ok(`A received peer:left(B) (B.id=${bid})`, pl?.peerId === bid, JSON.stringify(pl))
+  ok(`explicit leave emits peer:left(B2)`, pl?.peerId === B2.id, JSON.stringify(pl))
 
   A.disconnect()
+  B2.disconnect()
   console.log(`\n== ${pass} passed, ${fails.length} failed ==`)
   process.exit(fails.length === 0 ? 0 : 1)
 }
