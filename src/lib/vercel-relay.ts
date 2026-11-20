@@ -1,5 +1,6 @@
 import { createClient, type RedisClientType } from 'redis'
 import type { WebSocket } from '@vercel/functions'
+import { waitUntil } from '@vercel/functions'
 import { resolvePicoVersion } from './server-version'
 import { versionMismatch } from './version'
 
@@ -417,7 +418,9 @@ export function handleVercelSocket(ws: WebSocket, request: Request) {
     clearInterval(heartbeat)
     clients.delete(client.id)
     for (const key of limits.keys()) if (key.startsWith(`${client.id}:`)) limits.delete(key)
-    void markDisconnected(client).catch((error) => console.error('[vercel-relay] disconnect cleanup failed', error))
+    waitUntil(markDisconnected(client).catch((error) => {
+      console.error('[vercel-relay] disconnect cleanup failed', error instanceof Error ? error.message : error)
+    }))
   }
   ws.on('close', close)
   ws.on('error', close)
