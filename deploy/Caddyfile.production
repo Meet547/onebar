@@ -51,7 +51,7 @@
 		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
-		Referrer-Policy "strict-origin-when-cross-origin"
+		Referrer-Policy "no-referrer"
 		# Camera/mic/display-capture stay same-origin; everything else denied.
 		Permissions-Policy "camera=(self), microphone=(self), display-capture=(self), geolocation=(), payment=(), usb=()"
 		# CSP: Next.js injects inline bootstrap scripts and styles → 'unsafe-inline'

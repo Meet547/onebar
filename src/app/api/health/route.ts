@@ -74,7 +74,7 @@ export async function GET(request: Request) {
     note: 'coturn stats file not found — dev without coturn, or the stats volume is not mounted',
   }
   try {
-    const raw = await readFile(file, 'utf8')
+    const raw = await readFile(/*turbopackIgnore: true*/ file, 'utf8')
     const s = JSON.parse(raw) as TurnStats
     const age = s.ts ? Date.now() - s.ts : null
     turn = {
@@ -95,7 +95,7 @@ export async function GET(request: Request) {
     // container would defeat the ts check above.
     if (!turn.stale) {
       try {
-        const m = await stat(file)
+        const m = await stat(/*turbopackIgnore: true*/ file)
         turn.stale = Date.now() - m.mtimeMs > STALE_AFTER_MS
       } catch {
         /* stat failed — keep the ts-based verdict */

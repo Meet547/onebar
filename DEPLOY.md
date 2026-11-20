@@ -411,8 +411,9 @@ status and `docker compose logs coturn` for the cert-watcher lines.
 
 ## Scaling notes
 
-- One room caps at **8 participants** (hard limit in the signaling relay;
-  mesh upload grows per participant, and 8 keeps the weakest phone cool).
+- One room caps at **10 participants** (hard limit in both signaling implementations).
+  Mesh upload and encoding cost grow with every peer; this admission limit is
+  not a guarantee of ten-camera performance on every device or connection.
 - A 1-vCPU VPS serves **many hundreds of concurrent rooms** — the server only
   relays kilobytes of SDP/chat per meeting. Media scales because peers scale.
 - To run multiple signaling replicas you'd add sticky sessions

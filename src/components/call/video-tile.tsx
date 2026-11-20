@@ -61,7 +61,7 @@ export const VideoTile = memo(function VideoTile({ peerId, state, isSelf, large 
   return (
     <div
       ref={ringRef}
-      className={`relative h-full w-full overflow-hidden rounded-[20px] transition-shadow duration-300 ${
+      className={`relative h-full w-full overflow-hidden rounded-md transition-shadow duration-300 ${
         showAvatar ? 'border border-black/[0.06] bg-[#f5f5f7]' : 'bg-[#0d0d0f]'
       }`}
     >
@@ -93,7 +93,7 @@ export const VideoTile = memo(function VideoTile({ peerId, state, isSelf, large 
       )}
 
       {/* Name + live mic meter */}
-      <div className="absolute bottom-2 left-2 flex max-w-[calc(100%-16px)] items-center gap-2 rounded-full bg-[#0d0d0f]/60 py-1.5 pl-2.5 pr-3 backdrop-blur-md">
+      <div className="absolute bottom-2 left-2 flex max-w-[calc(100%-16px)] items-center gap-2 rounded-md bg-[#0d0d0f]/60 py-1.5 pl-2.5 pr-3 backdrop-blur-md">
         {micOn ? (
           <VoiceBars peerId={peerId} />
         ) : (
@@ -110,14 +110,14 @@ export const VideoTile = memo(function VideoTile({ peerId, state, isSelf, large 
           while we are actually still dialing — say which one it is. */}
       {!isSelf &&
         (state.connecting ? (
-          <div className="absolute right-2 top-2 flex items-center gap-1.5 rounded-full bg-[#0d0d0f]/45 px-2.5 py-1.5 backdrop-blur-md">
+          <div className="absolute right-2 top-2 flex items-center gap-1.5 rounded-md bg-[#0d0d0f]/45 px-2.5 py-1.5 backdrop-blur-md">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#ff9500]" aria-hidden />
             <span className="text-[10px] font-bold uppercase tracking-wide text-white/90">
               {hasStream ? 'Reconnecting…' : 'Connecting…'}
             </span>
           </div>
         ) : (
-          <div className="absolute right-2 top-2 rounded-full bg-[#0d0d0f]/45 px-2 py-1.5 backdrop-blur-md">
+          <div className="absolute right-2 top-2 rounded-md bg-[#0d0d0f]/45 px-2 py-1.5 backdrop-blur-md">
             <NetworkBars level={level} />
           </div>
         ))}

@@ -1,9 +1,11 @@
 import type { Metadata, Viewport } from "next";
+import { Manrope } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "sonner";
 import { ClientErrorReporter } from "./client-error-report";
 
 const TITLE = "Pico — calls that weigh nothing";
+const manrope = Manrope({ subsets: ["latin"], display: "swap", variable: "--font-manrope" });
 const DESCRIPTION =
   "Peer-to-peer video calling that sips data, battery and CPU. Built to work on a single bar of signal. No accounts, no downloads, nothing recorded.";
 
@@ -41,7 +43,6 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
-  maximumScale: 1,
   themeColor: "#ffffff",
 };
 
@@ -51,7 +52,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="en" suppressHydrationWarning className={manrope.variable}>
       <body className="font-sans antialiased bg-white text-foreground">
         {/* Version guard: registers the app-shell service worker and reloads
             once when a hashed chunk fails (deploy under a long-lived tab). */}

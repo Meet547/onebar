@@ -36,37 +36,12 @@ import { type ChatMessage, type QualityPreset } from '@/lib/call/types'
 // music.ts is dynamic-imported below (task 11) — the listen-together module
 // stays out of the first-load bundle; only this type import is erased.
 import type { MusicHandle } from '@/lib/call/music'
+import { Sheet } from './sheet'
 import { NetworkBars, LEVEL_LABEL } from './network-bars'
 
 /* ------------------------------------------------------------------ */
 /* Shared sheet shell                                                   */
 /* ------------------------------------------------------------------ */
-
-function Sheet({
-  title,
-  onClose,
-  children,
-}: {
-  title: string
-  onClose: () => void
-  children: React.ReactNode
-}) {
-  return (
-    <aside
-      className="pico-sheet-up fixed inset-x-0 bottom-0 z-40 flex h-[68vh] flex-col rounded-t-[24px] border border-black/[0.05] bg-white/95 shadow-[0_-8px_40px_rgba(0,0,0,0.10)] backdrop-blur-xl sm:inset-y-0 sm:left-auto sm:right-4 sm:top-4 sm:bottom-24 sm:h-auto sm:w-[360px] sm:rounded-[24px]"
-      role="dialog"
-      aria-label={title}
-    >
-      <header className="flex items-center justify-between border-b border-black/[0.05] px-5 py-3.5">
-        <h2 className="text-[15px] font-bold tracking-[-0.01em] text-[#0d0d0f]">{title}</h2>
-        <button onClick={onClose} aria-label={`Close ${title}`} className="ios-square">
-          <X className="h-3.5 w-3.5" strokeWidth={2.6} />
-        </button>
-      </header>
-      {children}
-    </aside>
-  )
-}
 
 /* ------------------------------------------------------------------ */
 /* Chat                                                                 */
@@ -134,17 +109,17 @@ function EmojiPicker({ onPick, onClose }: { onPick: (e: string) => void; onClose
 
   return (
     <div
-      className="pico-pop absolute bottom-[calc(100%+8px)] left-2 right-2 z-10 rounded-[18px] border border-black/[0.05] bg-white p-2 shadow-[0_12px_40px_rgba(0,0,0,0.14)]"
+      className="pico-pop absolute bottom-[calc(100%+8px)] left-2 right-2 z-10 rounded-md border border-black/[0.05] bg-white p-2 shadow-[0_12px_40px_rgba(0,0,0,0.14)]"
       role="dialog"
       aria-label="Emoji picker"
     >
       <div className="flex items-center justify-between px-1 pb-1.5">
-        <div className="flex gap-0.5 overflow-x-auto">
+        <div className="pico-carousel flex gap-0.5 overflow-x-auto">
           {recent.length > 0 && (
             <button
               onClick={() => setGroup(-1)}
               aria-label="Recent emojis"
-              className={`h-7 rounded-full px-2.5 text-[11px] font-bold transition-colors ${group === -1 ? 'bg-[#0d0d0f] text-white' : 'text-[#7c7c82] hover:bg-[#f5f5f7]'}`}
+              className={`h-7 rounded-sm px-2.5 text-[11px] font-bold transition-colors ${group === -1 ? 'bg-[#0d0d0f] text-white' : 'text-[#62626a] hover:bg-[#f5f5f7]'}`}
             >
               Recent
             </button>
@@ -153,13 +128,13 @@ function EmojiPicker({ onPick, onClose }: { onPick: (e: string) => void; onClose
             <button
               key={g.name}
               onClick={() => setGroup(i)}
-              className={`h-7 rounded-full px-2.5 text-[11px] font-bold transition-colors ${group === i ? 'bg-[#0d0d0f] text-white' : 'text-[#7c7c82] hover:bg-[#f5f5f7]'}`}
+              className={`h-7 rounded-sm px-2.5 text-[11px] font-bold transition-colors ${group === i ? 'bg-[#0d0d0f] text-white' : 'text-[#62626a] hover:bg-[#f5f5f7]'}`}
             >
               {g.name}
             </button>
           ))}
         </div>
-        <button onClick={onClose} aria-label="Close emoji picker" className="shrink-0 rounded-full p-1 text-[#a9a9b0] hover:bg-[#f5f5f7]">
+        <button onClick={onClose} aria-label="Close emoji picker" className="shrink-0 rounded-md p-1 text-[#62626a] hover:bg-[#f5f5f7]">
           <X className="h-3.5 w-3.5" strokeWidth={2.6} />
         </button>
       </div>
@@ -168,7 +143,7 @@ function EmojiPicker({ onPick, onClose }: { onPick: (e: string) => void; onClose
           <button
             key={e + i}
             onClick={() => pick(e)}
-            className="flex h-9 w-9 items-center justify-center rounded-xl text-[20px] leading-none transition-transform duration-100 hover:bg-[#f5f5f7] active:scale-90"
+            className="flex h-9 w-9 items-center justify-center rounded-md text-[20px] leading-none transition-transform duration-100 hover:bg-[#f5f5f7] active:scale-90"
             aria-label={`Emoji ${e}`}
           >
             {e}
@@ -181,25 +156,71 @@ function EmojiPicker({ onPick, onClose }: { onPick: (e: string) => void; onClose
 
 export function ChatPanel({ onClose }: { onClose: () => void }) {
   const chat = useCallStore((s) => s.chat)
+  const typingPeers = useCallStore((s) => s.typingPeers)
   const selfId = useCallStore((s) => s.self.id)
   const [draft, setDraft] = useState('')
   const [replyTo, setReplyTo] = useState<ChatMessage | null>(null)
   const [emojiOpen, setEmojiOpen] = useState(false)
+  const [typingClock, setTypingClock] = useState(Date.now())
   const listRef = useRef<HTMLDivElement>(null)
+  const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const typingSent = useRef(false)
 
   useEffect(() => {
     const el = listRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [chat.length])
 
+  useEffect(() => {
+    const timer = window.setInterval(() => setTypingClock(Date.now()), 500)
+    return () => window.clearInterval(timer)
+  }, [])
+
   const send = () => {
     const text = draft.trim()
     if (!text) return
     getEngine().sendChat(text, replyTo ? { id: replyTo.id, name: replyTo.name, text: replyTo.text } : undefined)
+    if (typingSent.current) getEngine().sendChatTyping(false)
+    typingSent.current = false
+    if (typingTimer.current) clearTimeout(typingTimer.current)
     setDraft('')
     setReplyTo(null)
     setEmojiOpen(false)
   }
+
+  useEffect(() => () => {
+    if (typingTimer.current) clearTimeout(typingTimer.current)
+    if (typingSent.current) getEngine().sendChatTyping(false)
+  }, [])
+
+  const onDraftChange = (value: string) => {
+    setDraft(value.slice(0, 500))
+    const active = Boolean(value.trim())
+    if (!active) {
+      if (typingTimer.current) clearTimeout(typingTimer.current)
+      typingTimer.current = null
+      if (typingSent.current) getEngine().sendChatTyping(false)
+      typingSent.current = false
+      return
+    }
+    if (active && !typingSent.current) {
+      typingSent.current = true
+      getEngine().sendChatTyping(true)
+    }
+    if (typingTimer.current) clearTimeout(typingTimer.current)
+    typingTimer.current = setTimeout(() => {
+      typingSent.current = false
+      getEngine().sendChatTyping(false)
+    }, 1400)
+    if (!active && typingSent.current) {
+      typingSent.current = false
+      getEngine().sendChatTyping(false)
+    }
+  }
+
+  const typingNames = Object.values(typingPeers)
+    .filter((person) => typingClock - person.at < 2200)
+    .map((person) => person.name)
 
   const jumpTo = (id: string) => {
     const el = document.getElementById(`chat-msg-${id}`)
@@ -214,35 +235,35 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
   const renderQuote = (q: { id: string; name: string; text: string }, mine: boolean) => (
     <button
       onClick={() => jumpTo(q.id)}
-      className={`mb-1 block w-full rounded-[10px] border-l-2 px-2 py-1 text-left ${mine ? 'border-white/50 bg-white/10' : 'border-[#7c7c82] bg-black/[0.04]'}`}
+      className={`mb-1 block w-full rounded-sm px-2 py-1 text-left ${mine ? 'bg-white/10' : 'bg-black/[0.04]'}`}
       aria-label={`Jump to message from ${q.name}`}
     >
-      <span className={`block text-[10px] font-bold ${mine ? 'text-white/70' : 'text-[#7c7c82]'}`}>{q.name}</span>
-      <span className={`line-clamp-2 block text-[11px] leading-snug ${mine ? 'text-white/60' : 'text-[#7c7c82]'}`}>{q.text}</span>
+      <span className={`block text-[10px] font-bold ${mine ? 'text-white/70' : 'text-[#62626a]'}`}>{q.name}</span>
+      <span className={`line-clamp-2 block text-[11px] leading-snug ${mine ? 'text-white/60' : 'text-[#62626a]'}`}>{q.text}</span>
     </button>
   )
 
   return (
     <Sheet title="Chat" onClose={onClose}>
-      <div ref={listRef} className="ios-scroll flex-1 space-y-2.5 overflow-y-auto px-4 py-4">
+      <div ref={listRef} className="ios-scroll flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-4 py-4">
         {chat.length === 0 && (
-          <p className="mt-10 text-center text-[13px] font-medium text-[#a9a9b0]">Messages appear here</p>
+          <p className="mt-10 text-center text-[13px] font-medium text-[#62626a]">Messages appear here</p>
         )}
         {chat.map((m) =>
           m.system ? (
-            <p key={m.id} className="text-center text-[11px] font-semibold uppercase tracking-[0.06em] text-[#a9a9b0]">
+            <p key={m.id} className="text-center text-[11px] font-semibold uppercase tracking-[0.06em] text-[#62626a]">
               {m.text}
             </p>
           ) : m.from === selfId ? (
-            <div key={m.id} id={`chat-msg-${m.id}`} className="group flex justify-end rounded-xl">
+            <div key={m.id} id={`chat-msg-${m.id}`} className="group flex items-end justify-end gap-1.5">
               <button
                 onClick={() => setReplyTo(m)}
                 aria-label="Reply to your message"
-                className="pico-reply-btn mr-1.5 flex h-7 w-7 shrink-0 self-center items-center justify-center rounded-full bg-[#f5f5f7] text-[#7c7c82] hover:bg-[#ebebf0]"
+                className="pico-reply-btn mr-1.5 flex h-7 w-7 shrink-0 self-center items-center justify-center rounded-md bg-[#f5f5f7] text-[#62626a] hover:bg-[#ebebf0]"
               >
                 <Reply className="h-3.5 w-3.5 -scale-x-100" strokeWidth={2.4} />
               </button>
-              <div className="max-w-[80%] rounded-[18px] rounded-br-[6px] bg-[#0d0d0f] px-3.5 py-2">
+              <div className="max-w-[84%] min-w-0 rounded-[18px] rounded-br-[6px] bg-[#0d0d0f] px-3.5 py-2.5 shadow-sm">
                 {m.replyTo && renderQuote(m.replyTo, true)}
                 <p className="whitespace-pre-wrap break-words text-[13px] leading-snug text-white">{m.text}</p>
                 <p className="mt-0.5 text-right text-[10px] font-medium text-white/55">
@@ -251,41 +272,47 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
               </div>
             </div>
           ) : (
-            <div key={m.id} id={`chat-msg-${m.id}`} className="group flex justify-start rounded-xl">
-              <div className="max-w-[80%] rounded-[18px] rounded-bl-[6px] bg-[#f5f5f7] px-3.5 py-2">
-                <p className="text-[11px] font-bold text-[#7c7c82]">{m.name}</p>
+            <div key={m.id} id={`chat-msg-${m.id}`} className="group flex items-end justify-start gap-1.5">
+              <div className="max-w-[84%] min-w-0 rounded-[18px] rounded-bl-[6px] border border-black/[0.06] bg-[#f5f5f7] px-3.5 py-2.5">
+                <p className="text-[11px] font-bold text-[#62626a]">{m.name}</p>
                 {m.replyTo && renderQuote(m.replyTo, false)}
                 <p className="mt-0.5 whitespace-pre-wrap break-words text-[13px] leading-snug text-[#0d0d0f]">
                   {m.text}
                 </p>
-                <p className="mt-0.5 text-[10px] font-medium text-[#a9a9b0]">
+                <p className="mt-0.5 text-[10px] font-medium text-[#62626a]">
                   {new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                 </p>
               </div>
               <button
                 onClick={() => setReplyTo(m)}
                 aria-label={`Reply to ${m.name}`}
-                className="pico-reply-btn ml-1.5 flex h-7 w-7 shrink-0 self-center items-center justify-center rounded-full bg-[#f5f5f7] text-[#7c7c82] hover:bg-[#ebebf0]"
+                className="pico-reply-btn ml-1.5 flex h-7 w-7 shrink-0 self-center items-center justify-center rounded-md bg-[#f5f5f7] text-[#62626a] hover:bg-[#ebebf0]"
               >
                 <Reply className="h-3.5 w-3.5 -scale-x-100" strokeWidth={2.4} />
               </button>
             </div>
           ),
         )}
+        {typingNames.length > 0 && (
+          <div className="flex items-center gap-2 self-start rounded-full border border-black/[0.06] bg-[#f5f5f7] px-3 py-2 text-[12px] font-medium text-[#62626a]" role="status" aria-live="polite">
+            <span>{typingNames.length === 1 ? `${typingNames[0]} is typing` : 'Someone is typing'}</span>
+            <span className="pico-typing-dots" aria-hidden="true"><i /><i /><i /></span>
+          </div>
+        )}
       </div>
-      <footer className="safe-bottom relative border-t border-black/[0.05] p-3">
+      <footer className="safe-bottom relative shrink-0 border-t border-black/[0.08] bg-white/95 p-3">
         {emojiOpen && <EmojiPicker onPick={(e) => setDraft((d) => (d + e).slice(0, 500))} onClose={() => setEmojiOpen(false)} />}
         {replyTo && (
-          <div className="mb-2 flex items-center gap-2 rounded-[14px] bg-[#f5f5f7] px-3 py-2">
-            <Reply className="h-3.5 w-3.5 shrink-0 -scale-x-100 text-[#7c7c82]" strokeWidth={2.4} />
+          <div className="mb-2 flex items-center gap-2 rounded-md bg-[#f5f5f7] px-3 py-2">
+            <Reply className="h-3.5 w-3.5 shrink-0 -scale-x-100 text-[#62626a]" strokeWidth={2.4} />
             <div className="min-w-0 flex-1 border-l-2 border-[#c7c7cd] pl-2">
-              <p className="text-[10px] font-bold text-[#7c7c82]">Replying to {replyTo.name}</p>
-              <p className="line-clamp-1 text-[11px] leading-snug text-[#a9a9b0]">{replyTo.text}</p>
+              <p className="text-[10px] font-bold text-[#62626a]">Replying to {replyTo.name}</p>
+              <p className="line-clamp-1 text-[11px] leading-snug text-[#62626a]">{replyTo.text}</p>
             </div>
             <button
               onClick={() => setReplyTo(null)}
               aria-label="Cancel reply"
-              className="shrink-0 rounded-full p-1 text-[#a9a9b0] hover:bg-[#ebebf0]"
+            className="shrink-0 rounded-md p-1 text-[#62626a] hover:bg-[#ebebf0]"
             >
               <X className="h-3.5 w-3.5" strokeWidth={2.6} />
             </button>
@@ -296,29 +323,35 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
             onClick={() => setEmojiOpen((v) => !v)}
             aria-label={emojiOpen ? 'Close emoji picker' : 'Open emoji picker'}
             aria-expanded={emojiOpen}
-            className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full transition-colors ${emojiOpen ? 'bg-[#0d0d0f] text-white' : 'text-[#7c7c82] hover:bg-[#f5f5f7]'}`}
+            className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-md transition-colors ${emojiOpen ? 'bg-[#0d0d0f] text-white' : 'text-[#62626a] hover:bg-[#f5f5f7]'}`}
           >
             <Smile className="h-[18px] w-[18px]" strokeWidth={2.2} />
           </button>
-          <input
+          <textarea
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => onDraftChange(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault()
                 send()
               }
             }}
-            placeholder="Message"
+            onKeyUp={(e) => {
+              const target = e.currentTarget
+              target.style.height = '40px'
+              target.style.height = `${Math.min(target.scrollHeight, 112)}px`
+            }}
+            placeholder="Write a message…"
             aria-label="Chat message"
             maxLength={500}
-            className="ios-field h-10 flex-1 rounded-full"
+            rows={1}
+            className="ios-field min-h-10 max-h-28 min-w-0 flex-1 resize-none rounded-[14px] py-2.5 leading-5"
           />
           <button
             onClick={send}
             disabled={!draft.trim()}
             aria-label="Send message"
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#0d0d0f] text-white transition-all duration-[130ms] ease-[cubic-bezier(0.34,1.35,0.64,1)] hover:bg-[#26262b] active:scale-90 disabled:bg-[#e8e8ed] disabled:text-[#a9a9b0]"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-[#0d0d0f] text-white transition-all duration-[130ms] ease-[cubic-bezier(0.22,1,0.36,1)] hover:bg-[#26262b] active:scale-90 disabled:bg-[#e8e8ed] disabled:text-[#62626a]"
           >
             <ArrowUp className="h-4 w-4" strokeWidth={2.6} />
           </button>
@@ -389,24 +422,24 @@ export function ParticipantsPanel({ onClose, roomCode }: { onClose: () => void; 
     <Sheet title={`People · ${everyone.length}`} onClose={onClose}>
       <div className="border-b border-black/[0.05] p-3">
         <button onClick={copy} className="ios-pill-soft h-10 w-full text-[13px]">
-          {copied ? <Check className="h-4 w-4 text-[#30d158]" strokeWidth={2.6} /> : <Link2 className="h-4 w-4 text-[#7c7c82]" strokeWidth={2.2} />}
+          {copied ? <Check className="h-4 w-4 text-[#30d158]" strokeWidth={2.6} /> : <Link2 className="h-4 w-4 text-[#62626a]" strokeWidth={2.2} />}
           {copied ? 'Link copied' : 'Copy invite link'}
         </button>
-        <p className="mt-2 text-center font-mono text-[11px] font-medium tracking-wide text-[#a9a9b0]">
+        <p className="mt-2 text-center font-mono text-[11px] font-medium tracking-wide text-[#62626a]">
           {locked ? 'Locked · nobody new can join' : roomCode}
         </p>
       </div>
 
       {removed && (
-        <p className="px-4 pt-3 text-[12px] font-semibold text-[#ff3b30]" role="status">
+        <p className="px-4 pt-3 text-[12px] font-semibold text-[#c52d25]" role="status">
           {removed} was removed from the call
         </p>
       )}
 
       <ul className="ios-scroll flex-1 overflow-y-auto p-2">
         {everyone.map((p) => (
-          <li key={p.id} className="flex items-center gap-3 rounded-2xl px-3 py-2.5">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#e8e8ed] text-[12px] font-bold text-[#7c7c82]">
+          <li key={p.id} className="flex items-center gap-3 px-3 py-2.5">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#e8e8ed] text-[12px] font-bold text-[#62626a]">
               {p.name.slice(0, 2).toUpperCase()}
             </div>
             <div className="min-w-0 flex-1">
@@ -415,7 +448,7 @@ export function ParticipantsPanel({ onClose, roomCode }: { onClose: () => void; 
                 {p.isSelf ? ' (You)' : ''}
                 {hostId === p.id && <Crown className="h-3.5 w-3.5 shrink-0 text-[#f5a623]" aria-label="Host" strokeWidth={2.4} />}
               </p>
-              <p className="text-[12px] font-medium text-[#a9a9b0]">
+              <p className="text-[12px] font-medium text-[#62626a]">
                 {music.peerId === p.id
                   ? 'Playing music for everyone'
                   : p.sharing
@@ -425,8 +458,8 @@ export function ParticipantsPanel({ onClose, roomCode }: { onClose: () => void; 
                       : 'Camera off'}
               </p>
             </div>
-            <div className="flex items-center gap-1.5 text-[#7c7c82]">
-              {!p.micOn && <MicOff className="h-4 w-4 text-[#ff3b30]" aria-label="Muted" strokeWidth={2.4} />}
+            <div className="flex items-center gap-1.5 text-[#62626a]">
+              {!p.micOn && <MicOff className="h-4 w-4 text-[#c52d25]" aria-label="Muted" strokeWidth={2.4} />}
               {!p.camOn && !p.sharing && <CameraOff className="h-4 w-4" aria-label="Camera off" strokeWidth={2.4} />}
               {p.sharing && <MonitorUp className="h-4 w-4 text-[#30d158]" aria-label="Sharing" strokeWidth={2.4} />}
             </div>
@@ -437,7 +470,7 @@ export function ParticipantsPanel({ onClose, roomCode }: { onClose: () => void; 
                     onClick={() => getEngine().hostMute(p.id)}
                     aria-label={`Mute ${p.name}`}
                     title={`Mute ${p.name}`}
-                    className="press flex h-8 w-8 items-center justify-center rounded-full bg-[#f5f5f7] text-[#3c3c43] hover:bg-[#ebebf0] active:scale-90"
+                    className="press flex h-8 w-8 items-center justify-center rounded-md bg-[#f5f5f7] text-[#3c3c43] hover:bg-[#ebebf0] active:scale-90"
                   >
                     <MicOff className="h-3.5 w-3.5" strokeWidth={2.4} />
                   </button>
@@ -446,7 +479,7 @@ export function ParticipantsPanel({ onClose, roomCode }: { onClose: () => void; 
                   onClick={() => remove(p.id, p.name)}
                   aria-label={`Remove ${p.name}`}
                   title={`Remove ${p.name}`}
-                  className="press flex h-8 w-8 items-center justify-center rounded-full bg-[#ff3b30]/10 text-[#ff3b30] hover:bg-[#ff3b30]/15 active:scale-90"
+                  className="press flex h-8 w-8 items-center justify-center rounded-md bg-[#d62f25]/10 text-[#c52d25] hover:bg-[#d62f25]/15 active:scale-90"
                 >
                   <UserMinus className="h-3.5 w-3.5" strokeWidth={2.4} />
                 </button>
@@ -463,25 +496,25 @@ export function ParticipantsPanel({ onClose, roomCode }: { onClose: () => void; 
               onClick={() => getEngine().hostMuteAll()}
               className="ios-pill-soft h-10 flex-1 text-[13px]"
             >
-              <MicOff className="h-4 w-4 text-[#7c7c82]" strokeWidth={2.2} />
+              <MicOff className="h-4 w-4 text-[#62626a]" strokeWidth={2.2} />
               Mute everyone
             </button>
             <button
               onClick={() => getEngine().hostLock(!locked)}
               className="ios-pill-soft h-10 flex-1 text-[13px]"
             >
-              {locked ? <LockOpen className="h-4 w-4 text-[#30d158]" strokeWidth={2.2} /> : <Lock className="h-4 w-4 text-[#7c7c82]" strokeWidth={2.2} />}
+              {locked ? <LockOpen className="h-4 w-4 text-[#30d158]" strokeWidth={2.2} /> : <Lock className="h-4 w-4 text-[#62626a]" strokeWidth={2.2} />}
               {locked ? 'Unlock room' : 'Lock room'}
             </button>
           </div>
-          <p className="mt-2 text-center text-[11px] font-medium text-[#a9a9b0]">
+          <p className="mt-2 text-center text-[11px] font-medium text-[#62626a]">
             You are the host — you can mute or remove anyone
           </p>
         </div>
       )}
 
-      <footer className="border-t border-black/[0.05] px-4 py-3 text-center text-[12px] font-medium text-[#a9a9b0]">
-        <Users className="mr-1 inline h-3 w-3" /> Peer-to-peer · up to 8 people
+      <footer className="border-t border-black/[0.05] px-4 py-3 text-center text-[12px] font-medium text-[#62626a]">
+        <Users className="mr-1 inline h-3 w-3" /> Peer-to-peer · up to 10 people
       </footer>
     </Sheet>
   )
@@ -591,7 +624,7 @@ export function MusicPanel({ onClose }: { onClose: () => void }) {
       <div className="ios-scroll flex-1 overflow-y-auto p-4">
         {music.peerId === null ? (
           <>
-            <div className="mb-4 flex items-start gap-3 rounded-[18px] bg-[#f5f5f7] px-4 py-3.5">
+            <div className="mb-4 flex items-start gap-3 rounded-md bg-[#f5f5f7] px-4 py-3.5">
               <Music2 className="mt-0.5 h-5 w-5 shrink-0 text-[#0d0d0f]" strokeWidth={2.2} />
               <p className="text-[13px] leading-relaxed text-[#3c3c43]">
                 Play music from this device and everyone in the call hears the same thing, in sync.
@@ -608,7 +641,7 @@ export function MusicPanel({ onClose }: { onClose: () => void }) {
               <Radio className="h-4 w-4" strokeWidth={2.2} />
               {starting ? 'Waiting for picker…' : 'Share audio from a tab…'}
             </button>
-            <p className="mt-2.5 text-center text-[12px] leading-relaxed text-[#a9a9b0]">
+            <p className="mt-2.5 text-center text-[12px] leading-relaxed text-[#62626a]">
               The browser picker lists every open tab, window and screen — pick the platform
               or tab you want to share. Only its sound is sent (~96 kbps); the video capture
               stops instantly, so this costs no CPU to speak of.
@@ -619,16 +652,16 @@ export function MusicPanel({ onClose }: { onClose: () => void }) {
 
             {testMode && (
               <button onClick={() => void startTest()} disabled={starting} className="ios-pill-soft mt-4 h-11 w-full text-[13px]">
-                <Music2 className="h-4 w-4 text-[#7c7c82]" strokeWidth={2.2} />
+                <Music2 className="h-4 w-4 text-[#62626a]" strokeWidth={2.2} />
                 {starting ? 'Starting…' : 'Play demo tune (test mode)'}
               </button>
             )}
           </>
         ) : isSelf ? (
           <>
-            <div className="rounded-[18px] bg-[#0d0d0f] px-4 py-4 text-white">
+            <div className="rounded-md bg-[#0d0d0f] px-4 py-4 text-white">
               <div className="flex items-center gap-3">
-                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-white/10">
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-white/10">
                   <Music2 className="h-5 w-5 text-[#30d158]" strokeWidth={2.2} />
                 </div>
                 <div className="min-w-0 flex-1">
@@ -677,7 +710,7 @@ export function MusicPanel({ onClose }: { onClose: () => void }) {
                   <button
                     onClick={togglePlay}
                     aria-label={music.playing ? 'Pause music' : 'Play music'}
-                    className="press flex h-11 w-11 items-center justify-center rounded-full bg-white text-[#0d0d0f] active:scale-90"
+                    className="press flex h-11 w-11 items-center justify-center rounded-md bg-white text-[#0d0d0f] active:scale-90"
                   >
                     {music.playing ? <Pause className="h-5 w-5" strokeWidth={2.4} /> : <Play className="h-5 w-5 translate-x-[1px]" strokeWidth={2.4} />}
                   </button>
@@ -686,7 +719,7 @@ export function MusicPanel({ onClose }: { onClose: () => void }) {
                 )}
                 <button
                   onClick={stop}
-                  className="flex h-11 items-center gap-2 rounded-full bg-[#ff3b30] px-5 text-[14px] font-bold text-white transition-all duration-[130ms] ease-[cubic-bezier(0.34,1.35,0.64,1)] hover:bg-[#eb3329] active:scale-95"
+                  className="flex h-11 items-center gap-2 rounded-md bg-[#d62f25] px-5 text-[14px] font-bold text-white transition-all duration-[130ms] ease-[cubic-bezier(0.22,1,0.36,1)] hover:bg-[#bf2920] active:scale-95"
                 >
                   <Square className="h-3.5 w-3.5" strokeWidth={2.6} />
                   Stop
@@ -719,14 +752,14 @@ export function MusicPanel({ onClose }: { onClose: () => void }) {
           </>
         ) : (
           <>
-            <div className="rounded-[18px] border border-black/[0.05] bg-[#f5f5f7] px-4 py-4">
+            <div className="rounded-md border border-black/[0.05] bg-[#f5f5f7] px-4 py-4">
               <div className="flex items-center gap-3">
-                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#0d0d0f]">
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-[#0d0d0f]">
                   <Music2 className="h-5 w-5 text-[#30d158]" strokeWidth={2.2} />
                 </div>
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-[15px] font-bold text-[#0d0d0f]">{music.title}</p>
-                  <p className="text-[12px] font-medium text-[#7c7c82]">
+                  <p className="text-[12px] font-medium text-[#62626a]">
                     {sharerName} · {music.playing ? 'playing now' : 'paused'}
                   </p>
                 </div>
@@ -742,7 +775,7 @@ export function MusicPanel({ onClose }: { onClose: () => void }) {
               </div>
 
               <div className="mt-4 flex items-center gap-2.5 border-t border-black/[0.05] pt-3.5">
-                <Volume2 className="h-4 w-4 shrink-0 text-[#7c7c82]" strokeWidth={2.2} />
+                <Volume2 className="h-4 w-4 shrink-0 text-[#62626a]" strokeWidth={2.2} />
                 <input
                   type="range"
                   min={0}
@@ -756,10 +789,10 @@ export function MusicPanel({ onClose }: { onClose: () => void }) {
                   aria-label="Music volume"
                   className="ios-range flex-1"
                 />
-                <span className="w-9 text-right font-mono text-[11px] tabular-nums text-[#a9a9b0]">{Math.round(remoteVol * 100)}</span>
+                <span className="w-9 text-right font-mono text-[11px] tabular-nums text-[#62626a]">{Math.round(remoteVol * 100)}</span>
               </div>
             </div>
-            <p className="mt-3 px-1 text-[12px] leading-relaxed text-[#a9a9b0]">
+            <p className="mt-3 px-1 text-[12px] leading-relaxed text-[#62626a]">
               The music arrives on its own audio channel, so you can keep talking and your camera
               quality never dips.
             </p>
@@ -794,7 +827,7 @@ export function SecurityPanel({ onClose }: { onClose: () => void }) {
   return (
     <Sheet title="Privacy & security" onClose={onClose}>
       <div className="ios-scroll flex-1 overflow-y-auto p-4">
-        <div className="mb-4 flex items-start gap-3 rounded-[18px] bg-[#0d0d0f] px-4 py-4 text-white">
+        <div className="mb-4 flex items-start gap-3 rounded-md bg-[#0d0d0f] px-4 py-4 text-white">
           <ShieldCheck className="mt-0.5 h-6 w-6 shrink-0 text-[#30d158]" strokeWidth={2.2} />
           <div>
             <p className="text-[15px] font-bold">Encrypted, end to end</p>
@@ -806,12 +839,12 @@ export function SecurityPanel({ onClose }: { onClose: () => void }) {
           </div>
         </div>
 
-        <div className="overflow-hidden rounded-[18px] border border-black/[0.05]">
+        <div className="overflow-hidden rounded-md border border-black/[0.05]">
           <div className="flex items-center gap-3 px-4 py-3">
             {passcodeProtected ? (
               <KeyRound className="h-4 w-4 shrink-0 text-[#30d158]" strokeWidth={2.2} />
             ) : (
-              <LockOpen className="h-4 w-4 shrink-0 text-[#7c7c82]" strokeWidth={2.2} />
+              <LockOpen className="h-4 w-4 shrink-0 text-[#62626a]" strokeWidth={2.2} />
             )}
             <p className="text-[13px] font-medium text-[#3c3c43]">
               {passcodeProtected ? 'Protected with a passcode' : 'Open room — anyone with the link can join'}
@@ -819,21 +852,21 @@ export function SecurityPanel({ onClose }: { onClose: () => void }) {
           </div>
           {PRIVACY_ROWS.map((row, i) => (
             <div key={row.title} className={`flex items-start gap-3 border-t border-black/[0.05] px-4 py-3`}>
-              <row.icon className="mt-0.5 h-4 w-4 shrink-0 text-[#7c7c82]" strokeWidth={2.2} />
+              <row.icon className="mt-0.5 h-4 w-4 shrink-0 text-[#62626a]" strokeWidth={2.2} />
               <div>
                 <p className="text-[14px] font-semibold text-[#0d0d0f]">{row.title}</p>
-                <p className="mt-0.5 text-[12px] leading-relaxed text-[#7c7c82]">{row.text}</p>
+                <p className="mt-0.5 text-[12px] leading-relaxed text-[#62626a]">{row.text}</p>
               </div>
             </div>
           ))}
         </div>
 
-        <div className="mt-4 overflow-hidden rounded-[18px] border border-black/[0.05]">
+        <div className="mt-4 overflow-hidden rounded-md border border-black/[0.05]">
           {isHost ? (
             <div className="flex items-center justify-between gap-3 px-4 py-3.5">
               <div>
                 <p className="text-[14px] font-semibold text-[#0d0d0f]">Lock this call</p>
-                <p className="mt-0.5 text-[12px] leading-relaxed text-[#7c7c82]">
+                <p className="mt-0.5 text-[12px] leading-relaxed text-[#62626a]">
                   Nobody new can join until you turn this off.
                 </p>
               </div>
@@ -857,7 +890,7 @@ export function SecurityPanel({ onClose }: { onClose: () => void }) {
           )}
         </div>
 
-        <p className="mt-4 px-1 text-[12px] leading-relaxed text-[#a9a9b0]">
+        <p className="mt-4 px-1 text-[12px] leading-relaxed text-[#62626a]">
           Pico runs entirely in your browser. There is no server-side storage at all — refreshing
           this page removes the last trace of the call.
         </p>
@@ -906,18 +939,18 @@ export function QualityPanel({ onClose }: { onClose: () => void }) {
     <Sheet title="Video quality" onClose={onClose}>
       <div className="ios-scroll flex-1 overflow-y-auto p-4">
         <DeviceSection />
-        <div className="mb-4 flex items-center justify-between rounded-[18px] bg-[#f5f5f7] px-4 py-3">
+        <div className="mb-4 flex items-center justify-between rounded-md bg-[#f5f5f7] px-4 py-3">
           <div>
             <p className="text-[15px] font-bold text-[#0d0d0f]">{effective || 'Auto'}</p>
-            <p className="text-[12px] font-medium tabular-nums text-[#7c7c82]">Sending ~{bitrate} kbps</p>
+            <p className="text-[12px] font-medium tabular-nums text-[#62626a]">Sending ~{bitrate} kbps</p>
           </div>
           <div className="flex items-center gap-2">
             <NetworkBars level={overall} size="md" />
-            <span className="text-[12px] font-medium text-[#7c7c82]">{statusLabel}</span>
+            <span className="text-[12px] font-medium text-[#62626a]">{statusLabel}</span>
           </div>
         </div>
 
-        <div className="overflow-hidden rounded-[18px] border border-black/[0.05]">
+        <div className="overflow-hidden rounded-md border border-black/[0.05]">
           {PRESET_OPTIONS.map((opt, i) => (
             <button
               key={opt.key}
@@ -929,18 +962,18 @@ export function QualityPanel({ onClose }: { onClose: () => void }) {
             >
               <span>
                 <span className="block text-[15px] font-semibold text-[#0d0d0f]">{opt.label}</span>
-                <span className="block text-[12px] font-medium text-[#7c7c82]">{opt.hint}</span>
+                <span className="block text-[12px] font-medium text-[#62626a]">{opt.hint}</span>
               </span>
               {preset === opt.key && <Check className="h-4 w-4 shrink-0 text-[#30d158]" strokeWidth={2.8} />}
             </button>
           ))}
         </div>
 
-        <div className="mt-4 overflow-hidden rounded-[18px] border border-black/[0.05]">
+        <div className="mt-4 overflow-hidden rounded-md border border-black/[0.05]">
           <div className="flex items-center justify-between gap-3 px-4 py-3.5">
             <div>
               <p className="text-[14px] font-semibold text-[#0d0d0f]">Lite mode</p>
-              <p className="mt-0.5 text-[12px] leading-relaxed text-[#7c7c82]">
+              <p className="mt-0.5 text-[12px] leading-relaxed text-[#62626a]">
                 Audio-only send, receive video only from the active speaker.
                 {liteAuto ? ' Auto-enabled for your connection.' : ''} Lowest data, lowest CPU.
               </p>
@@ -956,7 +989,7 @@ export function QualityPanel({ onClose }: { onClose: () => void }) {
           </div>
         </div>
 
-        <p className="mt-4 px-1 text-[12px] leading-relaxed text-[#a9a9b0]">
+        <p className="mt-4 px-1 text-[12px] leading-relaxed text-[#62626a]">
           Pico sends every stream directly to the other person — nothing is uploaded to a server.
           Audio uses Opus DTX, so silence costs almost nothing. Music in Listen Together steps down
           to 48 kbps on weak links, before your video ever stutters.
@@ -993,16 +1026,17 @@ function DeviceSection() {
 
   if (mics.length < 2 && cams.length < 2 && !mediaNotice) return null
   return (
-    <div className="mb-4 flex flex-col gap-2 rounded-[18px] bg-[#f5f5f7] px-4 py-3">
-      <p className="text-[12px] font-bold uppercase tracking-wide text-[#7c7c82]">Devices</p>
+    <div className="mb-4 flex flex-col gap-2 rounded-md bg-[#f5f5f7] px-4 py-3">
+      <p className="text-[12px] font-bold uppercase tracking-wide text-[#62626a]">Devices</p>
       {mics.length > 1 && (
         <select
+          aria-label="Microphone device"
           value={selMic}
           onChange={(e) => {
             setSelMic(e.target.value)
             void getEngine().switchDevice('mic', e.target.value)
           }}
-          className="w-full rounded-lg border border-black/10 bg-white px-2 py-1.5 text-[13px] font-medium text-[#0d0d0f]"
+          className="w-full rounded-sm border border-black/10 bg-white px-2 py-1.5 text-[13px] font-medium text-[#0d0d0f]"
         >
           {mics.map((d) => (
             <option key={d.deviceId} value={d.deviceId}>{d.label || 'Microphone'}</option>
@@ -1011,12 +1045,13 @@ function DeviceSection() {
       )}
       {cams.length > 1 && (
         <select
+          aria-label="Camera device"
           value={selCam}
           onChange={(e) => {
             setSelCam(e.target.value)
             void getEngine().switchDevice('cam', e.target.value)
           }}
-          className="w-full rounded-lg border border-black/10 bg-white px-2 py-1.5 text-[13px] font-medium text-[#0d0d0f]"
+          className="w-full rounded-sm border border-black/10 bg-white px-2 py-1.5 text-[13px] font-medium text-[#0d0d0f]"
         >
           {cams.map((d) => (
             <option key={d.deviceId} value={d.deviceId}>{d.label || 'Camera'}</option>

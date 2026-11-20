@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import {
   MessageSquare,
@@ -20,7 +20,7 @@ import { useCallStore } from '@/lib/call/store'
 import type { ChatMessage, PeerState } from '@/lib/call/types'
 import { subscribeLevel } from '@/lib/call/audio-levels'
 import { VideoTile } from './video-tile'
-import { NetworkBars } from './network-bars'
+import { LEVEL_LABEL, NetworkBars } from './network-bars'
 import { ChatPanel, MusicPanel, ParticipantsPanel, QualityPanel, SecurityPanel } from './panels'
 import { DebugOverlay } from './debug-overlay'
 import { BrandMark, useSpeakingRingSoft } from './brand'
@@ -44,7 +44,7 @@ function CallTimer() {
   const mm = String(Math.floor(secs / 60)).padStart(2, '0')
   const ss = String(secs % 60).padStart(2, '0')
   return (
-    <span className="font-mono text-[12px] tabular-nums text-[#7c7c82]">
+    <span className="font-mono text-[12px] tabular-nums text-[#62626a]">
       {mm}:{ss}
     </span>
   )
@@ -57,6 +57,8 @@ function ControlButton({
   active,
   danger,
   label,
+  displayLabel,
+  shortcut,
   badge,
   children,
 }: {
@@ -64,21 +66,28 @@ function ControlButton({
   active?: boolean
   danger?: boolean
   label: string
+  displayLabel?: string
+  shortcut?: string
   badge?: number
   children: React.ReactNode
 }) {
+  const labelId = useId()
   return (
     <button
       onClick={onClick}
-      aria-label={label}
-      title={label}
-      className={`ios-control ${active ? 'ios-control-active' : ''} ${danger ? 'ios-control-danger' : ''}`}
+      aria-labelledby={`${labelId}-visible ${labelId}-action`}
+      className={`ios-control control-action ${active ? 'ios-control-active' : ''} ${danger ? 'ios-control-danger' : ''}`}
     >
       <span key={label + (active ? '1' : '0') + (danger ? 'd' : '')} className="pico-icon-swap flex">
         {children}
       </span>
+      <span id={`${labelId}-visible`} className="hidden items-center gap-1 text-[12px] font-semibold leading-none tracking-[-0.01em] md:inline-flex">
+        {displayLabel ?? label}
+        {shortcut && <kbd className="rounded-sm border border-current/20 px-1 py-0.5 font-mono text-[9px] font-semibold opacity-70">{shortcut}</kbd>}
+      </span>
+      <span id={`${labelId}-action`} className="sr-only">{label}</span>
       {badge !== undefined && badge > 0 && (
-        <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-[#ff3b30] px-1 text-[10px] font-bold text-white">
+        <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-[#d62f25] px-1 text-[10px] font-bold text-white">
           {badge > 9 ? '9+' : badge}
         </span>
       )}
@@ -130,7 +139,7 @@ function VideoGrid() {
         <div className="min-h-0 flex-1 pico-pop">
           <VideoTile peerId={spotId === 'self' ? 'self' : spotId} state={spotState} isSelf={spotId === 'self'} large />
         </div>
-        <div className="flex shrink-0 gap-3 overflow-x-auto pb-1">
+        <div className="pico-carousel flex shrink-0 gap-3 overflow-x-auto pb-1">
           {spotId !== 'self' && (
             <div className="h-20 w-32 shrink-0 pico-pop">
               <VideoTile peerId="self" state={selfState} isSelf />
@@ -204,14 +213,14 @@ function ChatPreview({ onOpen }: { onOpen: () => void }) {
         onOpen()
       }}
       aria-label="Open chat"
-      className="pico-toast-in fixed bottom-[176px] left-1/2 z-30 flex max-w-[min(92vw,380px)] -translate-x-1/2 items-center gap-2.5 rounded-[18px] border border-black/[0.05] bg-white/95 py-2.5 pl-3 pr-3.5 text-left shadow-[0_10px_36px_rgba(0,0,0,0.16)] backdrop-blur-xl sm:bottom-[132px]"
+      className="pico-toast-in fixed bottom-[176px] left-1/2 z-30 flex max-w-[min(92vw,380px)] -translate-x-1/2 items-center gap-2.5 rounded-md border border-black/[0.05] bg-white/95 py-2.5 pl-3 pr-3.5 text-left shadow-[0_10px_36px_rgba(0,0,0,0.16)] backdrop-blur-xl sm:bottom-[132px]"
     >
       <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#0d0d0f] text-[11px] font-bold text-white">
         {msg.name.slice(0, 2).toUpperCase()}
       </span>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-[12px] font-bold text-[#0d0d0f]">{msg.name}</span>
-        <span className="line-clamp-1 block text-[12px] leading-snug text-[#7c7c82]">
+        <span className="line-clamp-1 block text-[12px] leading-snug text-[#62626a]">
           {msg.replyTo ? `↩ ${msg.text}` : msg.text}
         </span>
       </span>
@@ -377,6 +386,31 @@ export function Room({ roomCode, onLeave }: { roomCode: string; onLeave: () => v
     }
   }
 
+  useEffect(() => {
+    const onShortcut = (event: KeyboardEvent) => {
+      if (event.altKey || event.ctrlKey || event.metaKey || event.repeat) return
+      const target = event.target
+      const isTyping = target instanceof HTMLElement && target.closest('input, textarea, select, [contenteditable="true"]')
+      if (isTyping && event.key !== 'Escape') return
+
+      const key = event.key.toLowerCase()
+      if (key === 'm') {
+        event.preventDefault()
+        toggleMic()
+      } else if (key === 'v') {
+        event.preventDefault()
+        void toggleCam()
+      } else if (key === 'c') {
+        event.preventDefault()
+        setPanel((current) => (current === 'chat' ? null : 'chat'))
+      } else if (event.key === 'Escape' && panel) {
+        setPanel(null)
+      }
+    }
+    window.addEventListener('keydown', onShortcut)
+    return () => window.removeEventListener('keydown', onShortcut)
+  }, [panel, toggleCam, toggleMic])
+
   const musicActive = music.peerId !== null
 
   return (
@@ -390,11 +424,11 @@ export function Room({ roomCode, onLeave }: { roomCode: string; onLeave: () => v
           </span>
           <button
             onClick={copyLink}
-            className="press flex max-w-[140px] items-center gap-1.5 rounded-full bg-[#f5f5f7] py-1.5 pl-3 pr-3 sm:max-w-[180px]"
+            className="press flex max-w-[140px] items-center gap-1.5 rounded-md bg-[#f5f5f7] py-1.5 pl-3 pr-3 sm:max-w-[180px]"
             title="Copy invite link"
           >
             <span className="truncate font-mono text-[12px] font-medium text-[#0d0d0f]">{roomCode}</span>
-            <span className="text-[11px] font-bold uppercase tracking-wide text-[#7c7c82]">Copy</span>
+            <span className="text-[11px] font-bold uppercase tracking-wide text-[#62626a]">Copy</span>
           </button>
         </div>
 
@@ -402,12 +436,12 @@ export function Room({ roomCode, onLeave }: { roomCode: string; onLeave: () => v
           {!signaling && <span className="text-[12px] font-semibold text-[#ff9500]">Reconnecting…</span>}
           <button
             onClick={() => setPanel('security')}
-            className="press flex items-center gap-1.5 rounded-full bg-[#f5f5f7] py-1.5 pl-2 pr-2.5"
+            className="press flex items-center gap-1.5 rounded-md bg-[#f5f5f7] py-1.5 pl-2 pr-2.5"
             title="Privacy and security"
-            aria-label="Privacy and security"
+            aria-label="Encrypted — privacy and security"
           >
             <ShieldCheck className="h-3.5 w-3.5 text-[#30d158]" strokeWidth={2.4} />
-            <span className="hidden text-[11px] font-bold uppercase tracking-wide text-[#7c7c82] sm:inline">
+            <span className="hidden text-[11px] font-bold uppercase tracking-wide text-[#62626a] sm:inline">
               Encrypted
             </span>
           </button>
@@ -416,7 +450,16 @@ export function Room({ roomCode, onLeave }: { roomCode: string; onLeave: () => v
             style={{ backgroundColor: peerCount > 0 ? '#30d158' : '#c7c7cd' }}
             title={peerCount > 0 ? 'In call' : 'Waiting for others'}
           />
-          <NetworkBars level={overall} />
+          <button
+            type="button"
+            onClick={() => setPanel('quality')}
+            aria-label={`${LEVEL_LABEL[overall]}. Open connection settings`}
+            title={`${LEVEL_LABEL[overall]} — open connection settings`}
+            className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] font-semibold text-[#62626a] hover:bg-[#f5f5f7]"
+          >
+            <NetworkBars level={overall} />
+            <span className="hidden md:inline">{LEVEL_LABEL[overall]}</span>
+          </button>
           <CallTimer />
         </div>
       </header>
@@ -426,7 +469,7 @@ export function Room({ roomCode, onLeave }: { roomCode: string; onLeave: () => v
         <VideoGrid />
         {peerCount === 0 && (
           <div className="pointer-events-none absolute inset-x-0 top-3 flex justify-center px-4">
-            <div className="pico-rise rounded-full bg-white/85 px-4 py-2 text-[12px] font-semibold text-[#7c7c82] shadow-[0_1px_6px_rgba(0,0,0,0.06)] backdrop-blur-md">
+            <div className="pico-rise rounded-md bg-white/85 px-4 py-2 text-[12px] font-semibold text-[#62626a] shadow-[0_1px_6px_rgba(0,0,0,0.06)] backdrop-blur-md">
               Share <span className="font-mono font-bold text-[#0d0d0f]">{roomCode}</span> to invite someone
             </div>
           </div>
@@ -438,7 +481,7 @@ export function Room({ roomCode, onLeave }: { roomCode: string; onLeave: () => v
         <button
           onClick={() => setPanel('music')}
           aria-label="Open music panel"
-          className="pico-pop mx-auto mb-1 flex max-w-[92vw] items-center gap-2.5 rounded-full bg-[#0d0d0f] py-2 pl-3 pr-4 text-white shadow-[0_8px_28px_rgba(0,0,0,0.22)]"
+          className="pico-pop mx-auto mb-1 flex max-w-[92vw] items-center gap-2.5 rounded-md bg-[#0d0d0f] py-2 pl-3 pr-4 text-white shadow-[0_8px_28px_rgba(0,0,0,0.22)]"
         >
           <Music2 className="h-4 w-4 shrink-0 text-[#30d158]" strokeWidth={2.4} />
           <span className="min-w-0 truncate text-[13px] font-semibold">{music.title}</span>
@@ -456,12 +499,14 @@ export function Room({ roomCode, onLeave }: { roomCode: string; onLeave: () => v
 
       {/* Control bar */}
       <nav className="safe-bottom z-20 flex justify-center pb-4 pt-1" aria-label="Meeting controls">
-        <div className="control-bar glass flex items-center gap-1 rounded-full border border-black/[0.05] px-2 py-2 shadow-[0_8px_28px_rgba(0,0,0,0.08)] sm:gap-2 sm:px-3">
-          <div ref={micMeterRef} className="rounded-full transition-shadow duration-200">
+        <div className="control-bar glass flex items-center gap-1 rounded-md border border-black/[0.05] px-2 py-2 shadow-[0_8px_28px_rgba(0,0,0,0.08)] sm:gap-2 sm:px-3">
+          <div ref={micMeterRef} className="rounded-md transition-shadow duration-200">
             <ControlButton
               onClick={toggleMic}
               active={!self.micOn}
               label={self.micOn ? 'Mute microphone' : 'Unmute microphone'}
+              displayLabel="Mic"
+              shortcut="M"
             >
               {self.micOn ? <Mic className="h-[19px] w-[19px]" strokeWidth={2.2} /> : <MicOff className="h-[19px] w-[19px]" strokeWidth={2.2} />}
             </ControlButton>
@@ -470,35 +515,39 @@ export function Room({ roomCode, onLeave }: { roomCode: string; onLeave: () => v
             onClick={() => void toggleCam()}
             active={!self.camOn}
             label={self.camOn ? 'Turn camera off' : 'Turn camera on'}
+            displayLabel="Cam"
+            shortcut="V"
           >
             {self.camOn ? <Video className="h-[19px] w-[19px]" strokeWidth={2.2} /> : <VideoOff className="h-[19px] w-[19px]" strokeWidth={2.2} />}
           </ControlButton>
-          <ControlButton onClick={() => void toggleShare()} active={self.sharing} label={self.sharing ? 'Stop sharing' : 'Share screen'}>
+          <ControlButton onClick={() => void toggleShare()} active={self.sharing} label={self.sharing ? 'Stop sharing' : 'Share screen'} displayLabel={self.sharing ? 'Stop' : 'Share'}>
             <MonitorUp className="h-[19px] w-[19px]" strokeWidth={2.2} />
           </ControlButton>
           <ControlButton
             onClick={() => setPanel(panel === 'music' ? null : 'music')}
             active={musicActive}
             label="Listen together"
+            displayLabel="Music"
           >
             <Music2 className="h-[19px] w-[19px]" strokeWidth={2.2} />
           </ControlButton>
-          <ControlButton onClick={() => setPanel(panel === 'chat' ? null : 'chat')} label="Chat" badge={unread}>
+          <ControlButton onClick={() => setPanel(panel === 'chat' ? null : 'chat')} label="Chat" displayLabel="Chat" shortcut="C" badge={unread}>
             <MessageSquare className="h-[19px] w-[19px]" strokeWidth={2.2} />
           </ControlButton>
-          <ControlButton onClick={() => setPanel(panel === 'people' ? null : 'people')} label="Participants">
+          <ControlButton onClick={() => setPanel(panel === 'people' ? null : 'people')} label="Participants" displayLabel="People">
             <Users className="h-[19px] w-[19px]" strokeWidth={2.2} />
           </ControlButton>
-          <ControlButton onClick={() => setPanel(panel === 'quality' ? null : 'quality')} label="Quality and connection">
+          <ControlButton onClick={() => setPanel(panel === 'quality' ? null : 'quality')} label="Quality and connection" displayLabel="Quality">
             <SlidersHorizontal className="h-[19px] w-[19px]" strokeWidth={2.2} />
           </ControlButton>
           <button
             onClick={leave}
             aria-label="Leave call"
-            className="ml-0.5 flex h-[52px] items-center gap-1.5 rounded-full bg-[#ff3b30] px-4 text-[15px] font-bold text-white transition-all duration-[130ms] ease-[cubic-bezier(0.34,1.35,0.64,1)] hover:bg-[#eb3329] active:scale-90 sm:ml-1 sm:px-5"
+            title="Leave call"
+            className="ml-0.5 flex h-[52px] items-center gap-1.5 rounded-md bg-[#d62f25] px-4 text-[14px] font-semibold tracking-[-0.01em] text-white transition-all duration-[130ms] ease-[cubic-bezier(0.22,1,0.36,1)] hover:bg-[#bf2920] active:scale-90 sm:ml-1 sm:px-5"
           >
             <Phone className="h-[17px] w-[17px] rotate-[135deg]" strokeWidth={2.4} />
-            <span className="hidden sm:inline">Leave</span>
+            <span className="hidden md:inline">Leave</span>
           </button>
         </div>
       </nav>

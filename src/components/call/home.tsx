@@ -1,5 +1,7 @@
 'use client'
 
+import { readDisplayName, saveDisplayName } from '@/lib/call/preferences'
+
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { ShieldAlert, ArrowRight, Lock, ShieldCheck, SignalHigh, Zap } from 'lucide-react'
@@ -7,7 +9,7 @@ import { generateRoomCode } from '@/lib/call/types'
 import { BrandMark } from './brand'
 
 const FEATURES = [
-  { icon: Zap, label: 'Peer-to-peer · no servers' },
+  { icon: Zap, label: 'Peer-to-peer media' },
   { icon: SignalHigh, label: 'Runs on one bar' },
   { icon: ShieldCheck, label: 'Encrypted, nothing saved' },
 ]
@@ -29,12 +31,13 @@ export function Home({
   const [passcode, setPasscode] = useState('')
   const [wantPasscode, setWantPasscode] = useState(false)
   const [insecure, setInsecure] = useState(false)
+  const [codeError, setCodeError] = useState('')
 
   useEffect(() => {
     // Cameras and microphones only open on secure origins — tell people early
     // instead of letting them wonder why the preview stays empty.
     const t = window.setTimeout(() => {
-      setName(window.localStorage.getItem('pico-name') ?? '')
+      setName(readDisplayName())
       setInsecure(!window.isSecureContext)
     }, 0)
     return () => window.clearTimeout(t)
@@ -42,31 +45,36 @@ export function Home({
 
   const start = () => {
     const clean = name.trim() || 'Guest'
-    window.localStorage.setItem('pico-name', clean)
+    saveDisplayName(clean)
     onCreate(passcode.trim())
   }
 
   const joinByCode = () => {
     const clean = code.trim().toLowerCase().replace(/[^a-z0-9-]/g, '')
-    if (clean.length < 4) return
+    if (clean.length < 4) {
+      setCodeError('Enter at least 4 letters or numbers to join.')
+      return
+    }
+    setCodeError('')
     router.push(`/?room=${encodeURIComponent(clean)}`)
   }
 
   return (
-    <div className="flex min-h-[100dvh] flex-col bg-white">
-      <main className="mx-auto flex w-full max-w-[400px] flex-1 flex-col justify-center px-6 py-12">
+    <div className="pico-home flex min-h-[100dvh] flex-col px-4 py-5 sm:px-6 sm:py-8">
+      <main className="mx-auto flex w-full max-w-[480px] flex-1 flex-col justify-center">
+        <section className="pico-home-card p-5 sm:p-8">
         {/* Brand */}
-        <div className="pico-rise mb-10 text-center">
-          <div className="mb-6 flex justify-center">
-            <BrandMark size={76} />
+        <div className="pico-rise mb-7 text-center sm:mb-8">
+          <div className="mb-5 flex justify-center sm:mb-6">
+            <BrandMark size={68} />
           </div>
-          <h1 className="text-[32px] font-extrabold leading-tight tracking-[-0.03em] text-[#0d0d0f]">
+          <h1 className="text-[34px] font-extrabold leading-[1.04] tracking-[-0.045em] text-[#0d0d0f] sm:text-[38px]">
             Calls that weigh
             <br />
             nothing.
           </h1>
-          <p className="mx-auto mt-3 max-w-[300px] text-[15px] leading-relaxed text-[#7c7c82]">
-            Peer-to-peer video calling, tuned to run on a single bar of signal.
+          <p className="mx-auto mt-3 max-w-[330px] text-[15px] leading-[1.6] text-[#62626a]">
+            Private video calls built to keep working when your signal drops to one bar.
           </p>
         </div>
 
@@ -75,7 +83,7 @@ export function Home({
           {insecure && (
             <div
               role="alert"
-              className="pico-pop mb-1 flex items-start gap-2.5 rounded-2xl bg-[#ff9500]/[0.08] px-4 py-3"
+              className="pico-pop mb-1 flex items-start gap-2.5 rounded-md bg-[#ff9500]/[0.08] px-4 py-3"
             >
               <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-[#ff9500]" strokeWidth={2.4} />
               <p className="text-[13px] font-semibold leading-snug text-[#b26a00]">
@@ -87,15 +95,15 @@ export function Home({
           {error && (
             <div
               role="alert"
-              className="pico-pop mb-1 flex items-center justify-between gap-3 rounded-2xl bg-[#ff3b30]/[0.07] px-4 py-3"
+              className="pico-pop mb-1 flex items-center justify-between gap-3 rounded-md bg-[#d62f25]/[0.07] px-4 py-3"
             >
-              <p className="text-[13px] font-semibold leading-snug text-[#ff3b30]">
+              <p className="text-[13px] font-semibold leading-snug text-[#c52d25]">
                 Could not start the call. Check your connection and try again.
               </p>
               <button
                 onClick={onDismissError}
                 aria-label="Dismiss error"
-                className="press shrink-0 text-[12px] font-bold uppercase tracking-wide text-[#ff3b30]/70"
+                className="press shrink-0 text-[12px] font-bold uppercase tracking-wide text-[#c52d25]/70"
               >
                 Dismiss
               </button>
@@ -104,13 +112,13 @@ export function Home({
           {notice && (
             <div
               role="alert"
-              className="pico-pop mb-1 flex items-center justify-between gap-3 rounded-2xl bg-[#ff3b30]/[0.07] px-4 py-3"
+              className="pico-pop mb-1 flex items-center justify-between gap-3 rounded-md bg-[#d62f25]/[0.07] px-4 py-3"
             >
-              <p className="text-[13px] font-semibold leading-snug text-[#ff3b30]">{notice}</p>
+              <p className="text-[13px] font-semibold leading-snug text-[#c52d25]">{notice}</p>
               <button
                 onClick={onDismissError}
                 aria-label="Dismiss notice"
-                className="press shrink-0 text-[12px] font-bold uppercase tracking-wide text-[#ff3b30]/70"
+                className="press shrink-0 text-[12px] font-bold uppercase tracking-wide text-[#c52d25]/70"
               >
                 Dismiss
               </button>
@@ -149,19 +157,19 @@ export function Home({
                     setPasscode('')
                   }}
                   aria-label="Remove passcode"
-                  className="press flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-[#f5f5f7] text-[#7c7c82] active:scale-90"
+                  className="press flex h-12 w-12 shrink-0 items-center justify-center rounded-md bg-[#f5f5f7] text-[#62626a] active:scale-90"
                 >
                   <Lock className="h-4 w-4" strokeWidth={2.2} />
                 </button>
               </div>
-              <p className="mt-1.5 px-1 text-[12px] font-medium leading-relaxed text-[#a9a9b0]">
+              <p className="mt-1.5 px-1 text-[12px] font-medium leading-relaxed text-[#62626a]">
                 Only people with the passcode can join. Leave empty for an open room.
               </p>
             </div>
           ) : (
             <button
               onClick={() => setWantPasscode(true)}
-              className="press mx-auto flex items-center gap-1.5 text-[13px] font-semibold text-[#7c7c82]"
+              className="press mx-auto flex items-center gap-1.5 text-[13px] font-semibold text-[#62626a]"
             >
               <Lock className="h-3.5 w-3.5" strokeWidth={2.4} />
               Add a passcode
@@ -173,20 +181,29 @@ export function Home({
           </button>
 
           <div className="flex items-center gap-3 py-1.5">
-            <span className="h-px flex-1 bg-[#e8e8ed]" />
-            <span className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[#a9a9b0]">
+              <span className="h-px flex-1 bg-black/[0.10]" />
+            <span className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[#62626a]">
               or join with a code
             </span>
-            <span className="h-px flex-1 bg-[#e8e8ed]" />
+            <span className="h-px flex-1 bg-black/[0.10]" />
           </div>
 
+          <div>
+            <label htmlFor="meeting-code" className="mb-1.5 block px-1 text-[12px] font-bold uppercase tracking-[0.08em] text-[#62626a]">
+              Meeting code
+            </label>
           <div className="flex gap-2">
             <input
+              id="meeting-code"
               value={code}
-              onChange={(e) => setCode(e.target.value)}
+              onChange={(e) => {
+                setCode(e.target.value)
+                if (codeError) setCodeError('')
+              }}
               onKeyDown={(e) => e.key === 'Enter' && joinByCode()}
               placeholder="abc-def-ghi"
-              aria-label="Meeting code"
+              aria-describedby="meeting-code-hint"
+              aria-invalid={Boolean(codeError)}
               autoCapitalize="off"
               autoCorrect="off"
               spellCheck={false}
@@ -194,12 +211,16 @@ export function Home({
             />
             <button
               onClick={joinByCode}
-              disabled={code.trim().length < 4}
-              aria-label="Join call with code"
-              className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-[#0d0d0f] text-white transition-all duration-[130ms] ease-[cubic-bezier(0.34,1.35,0.64,1)] hover:bg-[#26262b] active:scale-90 disabled:bg-[#e8e8ed] disabled:text-[#a9a9b0]"
+              aria-label="Join call"
+              className="flex h-12 shrink-0 items-center justify-center gap-1.5 rounded-md bg-[#0d0d0f] px-3 text-white transition-all duration-[130ms] ease-[cubic-bezier(0.22,1,0.36,1)] hover:bg-[#26262b] active:scale-90"
             >
               <ArrowRight className="h-5 w-5" strokeWidth={2.4} />
+              <span className="text-[13px] font-bold">Join</span>
             </button>
+          </div>
+            <p id="meeting-code-hint" aria-live="polite" className={`mt-1.5 px-1 text-[12px] font-medium ${codeError ? 'text-[#c52d25]' : 'text-[#62626a]'}`}>
+              {codeError || 'Enter the code shared by your host.'}
+            </p>
           </div>
         </div>
 
@@ -211,20 +232,21 @@ export function Home({
           {FEATURES.map((f) => (
             <div
               key={f.label}
-              className="flex items-center gap-1.5 rounded-full bg-[#f5f5f7] px-3.5 py-2"
+              className="flex items-center gap-1.5 rounded-md bg-[#f5f5f7] px-3.5 py-2"
             >
               <f.icon className="h-3.5 w-3.5 text-[#0d0d0f]" strokeWidth={2.4} />
               <span className="text-[12px] font-semibold text-[#3c3c43]">{f.label}</span>
             </div>
           ))}
         </div>
+        </section>
       </main>
 
-      <footer className="pb-8 text-center">
-        <p className="text-[12px] font-medium text-[#a9a9b0]">
-          No accounts · No downloads · Streams go device-to-device
+      <footer className="mx-auto pb-2 pt-5 text-center sm:pt-6">
+        <p className="text-[12px] font-medium text-[#62626a]">
+          No accounts · No downloads · Encrypted media
           <br />
-          Up to 8 people per call
+          Up to 10 people per call
         </p>
       </footer>
     </div>

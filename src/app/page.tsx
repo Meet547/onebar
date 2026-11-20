@@ -1,5 +1,7 @@
 'use client'
 
+import { readDisplayName, saveDisplayName } from '@/lib/call/preferences'
+
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import dynamic from 'next/dynamic'
@@ -94,7 +96,7 @@ function PicoApp() {
       previewRef.current = stream
       setJoinError(null)
       try {
-        const name = window.localStorage.getItem('pico-name') || 'Guest'
+        const name = readDisplayName() || 'Guest'
         const hash = passcode ? await hashPasscode(passcode) : pendingPasscodeHash.current
         await getEngine().start({
           roomId: roomCode,

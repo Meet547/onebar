@@ -55,29 +55,28 @@ const ICE_SERVERS: RTCIceServer[] = [
  * Cached for an hour; a failed fetch falls back to STUN-only, never blocks
  * the call for more than the 4s timeout.
  */
-const ICE_CACHE_TTL_MS = 3_600_000
-let iceCache: { servers: RTCIceServer[]; at: number } | null = null
+let iceCache: { servers: RTCIceServer[]; expiresAt: number } | null = null
 
 async function fetchIceServers(force = false): Promise<RTCIceServer[]> {
-  if (!force && iceCache && Date.now() - iceCache.at < ICE_CACHE_TTL_MS) return iceCache.servers
+  if (!force && iceCache && Date.now() < iceCache.expiresAt) return iceCache.servers
+  const ctrl = new AbortController()
+  const timer = window.setTimeout(() => ctrl.abort(), 10_000)
   try {
-    const ctrl = new AbortController()
-    // Generous budget: during a cold boot the endpoint waits for the relay
-    // keeper to finish reviving before it answers at all.
-    const timer = window.setTimeout(() => ctrl.abort(), 10_000)
     const res = await fetch('/api/ice', { signal: ctrl.signal, cache: 'no-store' })
-    window.clearTimeout(timer)
     if (res.ok) {
-      const data = (await res.json()) as { iceServers?: RTCIceServer[] }
+      const data = (await res.json()) as { iceServers?: RTCIceServer[]; ttl?: number }
       if (Array.isArray(data.iceServers) && data.iceServers.length > 0) {
-        iceCache = { servers: data.iceServers, at: Date.now() }
+        const ttl = typeof data.ttl === 'number' && Number.isFinite(data.ttl) ? Math.max(30, Math.min(3600, data.ttl)) : 300
+        iceCache = { servers: data.iceServers, expiresAt: Date.now() + ttl * 1000 }
         return iceCache.servers
       }
     }
   } catch {
-    /* unreachable or slow — STUN-only still works on friendly networks */
+    /* Friendly networks may still connect directly; retry configuration soon. */
+  } finally {
+    window.clearTimeout(timer)
   }
-  iceCache = { servers: ICE_SERVERS, at: Date.now() }
+  iceCache = { servers: ICE_SERVERS, expiresAt: Date.now() + 30_000 }
   return iceCache.servers
 }
 
@@ -87,8 +86,9 @@ const AUDIO_SENDER_BITRATE = 24_000
  *  for the 50 kbps video floor. */
 const AUDIO_SENDER_BITRATE_WEAK = 16_000
 const STATS_INTERVAL_MS = 3000
-/** Receive-side shedding kicks in from this room size on (speaker+spotlight). */
-export const SHED_ROOM_SIZE = 5
+/** Keep the full gallery subscribed throughout the supported ten-person room.
+ * Lite mode and hidden tabs still explicitly shed receive-side video. */
+export const SHED_ROOM_SIZE = 11
 const LITE_STORAGE_KEY = 'pico-lite'
 // All adaptation constants and the pure decision logic (classification,
 // budget split, CPU ladder) live in ./adaptive — unit-tested offline.
@@ -326,6 +326,7 @@ export class CallEngine {
   /** Camera capture forced to saver dims during a weak-link episode. */
   private captureShrunk = false
   private passwordHash = ''
+  private rejoinToken = ''
   private iceServers: RTCIceServer[] = ICE_SERVERS
 
   /* ---- adaptation state (tasks 2-5, 7, debug overlay) ---- */
@@ -485,6 +486,7 @@ export class CallEngine {
     this.adaptiveProfile = opts.preset === 'auto' ? 'balanced' : opts.preset
     this.testMode = !!opts.testMode
     this.passwordHash = opts.passwordHash ?? ''
+    this.rejoinToken = crypto.randomUUID()
 
     const store = useCallStore.getState()
     store.setSelf({ name: opts.name })
@@ -537,7 +539,7 @@ export class CallEngine {
       )
       socket.emit(
         'room:join',
-        { roomId: this.roomId, name: opts.name, passwordHash: this.passwordHash },
+        { roomId: this.roomId, name: opts.name, passwordHash: this.passwordHash, rejoinToken: this.rejoinToken },
         (res: { ok: boolean; self?: { id: string }; peers?: Array<{ id: string; name: string; micOn: boolean; camOn: boolean; sharing: boolean }>; hostId?: string; locked?: boolean; hasPassword?: boolean; music?: { peerId: string; title: string; playing: boolean; position: number; duration: number; streamId?: string } | null; reason?: string }) => {
           window.clearTimeout(guard)
           if (!res?.ok) {
@@ -626,6 +628,17 @@ export class CallEngine {
         useCallStore.getState().addChat(msg)
       },
     )
+    socket.on('chat:typing', ({ peerId, name, typing }: { peerId: string; name: string; typing: boolean }) => {
+      if (!peerId || peerId === this.myId) return
+      const store = useCallStore.getState()
+      if (typing) store.setTypingPeer(peerId, String(name || 'Someone'), Date.now())
+      else store.clearTypingPeer(peerId)
+    })
+    socket.on('chat:sent', ({ id }: { id: string }) => {
+      // Server echo is the authoritative sent state; the listener makes the
+      // acknowledgement explicit for future transport-level UI feedback.
+      void id
+    })
 
     /* ---- security & host controls ---- */
     socket.on('host:changed', ({ hostId }: { hostId: string }) => {
@@ -1047,6 +1060,7 @@ export class CallEngine {
   }
 
   private dropPeer(peerId: string) {
+    useCallStore.getState().clearTypingPeer(peerId)
     const pc = this.pcs.get(peerId)
     if (pc) {
       pc.close()
@@ -1983,7 +1997,16 @@ export class CallEngine {
 
   /* ---------------- stats / adaptation ---------------- */
 
+  private statsPolling = false
   private async pollStats() {
+    if (this.statsPolling) return
+    this.statsPolling = true
+    try { await this.collectStats() }
+    catch { this.logAdapt('Stats temporarily unavailable') }
+    finally { this.statsPolling = false }
+  }
+
+  private async collectStats() {
     if (this.pcs.size === 0) return
     this.pollTick++
 
@@ -2526,11 +2549,15 @@ export class CallEngine {
     this.socket?.emit('chat:message', rt && rt.id && rt.text ? { text: clean, replyTo: rt } : { text: clean })
   }
 
+  sendChatTyping(typing: boolean) {
+    this.socket?.emit('chat:typing', { typing })
+  }
+
   private rejoin() {
     if (!this.roomId || !this.socket) return
     this.socket.emit(
       'room:join',
-      { roomId: this.roomId, name: useCallStore.getState().self.name, passwordHash: this.passwordHash },
+      { roomId: this.roomId, name: useCallStore.getState().self.name, passwordHash: this.passwordHash, rejoinToken: this.rejoinToken },
       (res: { ok: boolean; self?: { id: string }; peers?: Array<{ id: string; name: string; micOn: boolean; camOn: boolean; sharing: boolean }>; hostId?: string; locked?: boolean; hasPassword?: boolean; music?: { peerId: string; title: string; playing: boolean; position: number; duration: number; streamId?: string } | null }) => {
         // The server hands out a fresh socket id after a reconnect — adopt it,
         // otherwise our own messages and presence updates stop matching.

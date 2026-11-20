@@ -1,3 +1,4 @@
+import { InvalidBody, readJsonObject } from '@/lib/request-body'
 import { NextResponse } from 'next/server'
 import { RateLimiter, providedToken, tokenMatches } from '@/lib/health-token'
 
@@ -15,11 +16,10 @@ export const dynamic = 'force-dynamic'
 
 const limiter = new RateLimiter(120, 60_000)
 const RING_MAX = 200
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const ring: any[] = []
+const ring: Array<Record<string, string | number | null>> = []
 
 const num = (v: unknown, max: number) =>
-  typeof v === 'number' && Number.isFinite(v) ? Math.round(v * 100) / 100 : null
+  typeof v === 'number' && Number.isFinite(v) ? Math.round(Math.min(max, Math.max(0, v)) * 100) / 100 : null
 const str = (v: unknown, max: number) =>
   typeof v === 'string' ? v.slice(0, max) : ''
 
@@ -29,11 +29,9 @@ export async function POST(request: Request) {
   }
   let body: Record<string, unknown>
   try {
-    const raw = await request.text()
-    if (raw.length > 2048) return new NextResponse(null, { status: 413 })
-    body = JSON.parse(raw)
-  } catch {
-    return new NextResponse(null, { status: 400 })
+    body = await readJsonObject(request, 2048)
+  } catch (error) {
+    return new NextResponse(null, { status: error instanceof InvalidBody ? error.status : 400, headers: { 'Cache-Control': 'no-store' } })
   }
   const sample = {
     ts: new Date().toISOString(),

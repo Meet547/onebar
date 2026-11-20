@@ -51,7 +51,7 @@ export const RELAY_HOST = process.env.RELAY_HOST ?? '127.0.0.1'
 export const RELAY_PORT = Number(process.env.RELAY_PORT ?? 3003)
 export const RELAY_INFO_PORT = Number(process.env.RELAY_INFO_PORT ?? 3004)
 const SOCKET_PATH = process.env.SOCKET_PATH ?? '/'
-const MAX_PEERS_PER_ROOM = 8
+const MAX_PEERS_PER_ROOM = 10
 const REJOIN_GRACE_MS = 120_000
 
 // ---------------- data model ----------------
@@ -91,7 +91,7 @@ interface Room {
   passwordHash: string
   music: MusicSession | null
   /** Names seen recently — lets reconnects back into a locked room. */
-  recentNames: Map<string, number>
+  recentTokens: Map<string, number>
 }
 
 const rooms = new Map<string, Room>()
@@ -99,7 +99,7 @@ const rooms = new Map<string, Room>()
 const getRoom = (roomId: string): Room => {
   let room = rooms.get(roomId)
   if (!room) {
-    room = { peers: new Map(), hostId: null, locked: false, passwordHash: '', music: null, recentNames: new Map() }
+    room = { peers: new Map(), hostId: null, locked: false, passwordHash: '', music: null, recentTokens: new Map() }
     rooms.set(roomId, room)
   }
   return room
@@ -298,7 +298,7 @@ function attachRelay(httpServer: ReturnType<typeof createHttpServer>): IoServer 
     // Version handshake (engine sends it on every connect): echo the server
     // build so the client can one-shot reload when a deploy moved under it.
     socket.on('version:hello', (raw: unknown) => {
-      const client = (raw as { client?: string } | null)?.client ?? null
+      const client = safeString((raw as { client?: unknown } | null)?.client, 80) || null
       socket.emit('version:current', {
         server: SERVER_VERSION,
         clientMatches: !versionMismatch(client, SERVER_VERSION),
@@ -311,7 +311,12 @@ function attachRelay(httpServer: ReturnType<typeof createHttpServer>): IoServer 
         const roomId = safeString(data.roomId, 64).trim()
         const name = safeString(data.name, 24).trim() || 'Guest'
         const passwordHash = safeString(data.passwordHash, 64)
-        if (!roomId) return
+      const rejoinToken = safeString(data.rejoinToken, 64)
+      if (!allow(`${socket.id}:join`, 20, 10_000)) {
+        ack?.({ ok: false, reason: 'Too many join attempts — try again shortly' })
+        return
+      }
+        if (!roomId) { ack?.({ ok: false, reason: 'Invalid room code' }); return }
         // Room ids are join keys — restrict the charset to keep URLs clean.
         if (!/^[a-z0-9-]{4,64}$/.test(roomId)) {
           ack?.({ ok: false, reason: 'Invalid room code' })
@@ -341,14 +346,14 @@ function attachRelay(httpServer: ReturnType<typeof createHttpServer>): IoServer 
         if (
           room.locked &&
           !room.peers.has(socket.id) &&
-          !(name && Date.now() - (room.recentNames.get(name) ?? 0) < REJOIN_GRACE_MS)
+          !(rejoinToken && room.recentTokens.has(rejoinToken) && Date.now() - room.recentTokens.get(rejoinToken)! < REJOIN_GRACE_MS)
         ) {
           ack?.({ ok: false, reason: 'The host locked this call' })
           return
         }
 
         if (room.peers.size >= MAX_PEERS_PER_ROOM && !room.peers.has(socket.id)) {
-          ack?.({ ok: false, reason: 'Room is full (8 people max)' })
+          ack?.({ ok: false, reason: `Room is full (${MAX_PEERS_PER_ROOM} people max)` })
           return
         }
 
@@ -358,6 +363,7 @@ function attachRelay(httpServer: ReturnType<typeof createHttpServer>): IoServer 
         }
 
         currentRoom = roomId
+      socket.data.rejoinToken = rejoinToken
         peer = { id: socket.id, name, micOn: true, camOn: true, sharing: false }
         room.peers.set(socket.id, peer)
         if (!room.hostId) room.hostId = socket.id
@@ -403,12 +409,12 @@ function attachRelay(httpServer: ReturnType<typeof createHttpServer>): IoServer 
       }
       if (room) {
         room.peers.delete(socket.id)
-        if (peer?.name) {
-          room.recentNames.set(peer.name, Date.now())
-          if (room.recentNames.size > 100) {
+        if (socket.data.rejoinToken) {
+          room.recentTokens.set(socket.data.rejoinToken, Date.now())
+          if (room.recentTokens.size > 100) {
             const now = Date.now()
-            for (const [n, ts] of room.recentNames) {
-              if (now - ts > REJOIN_GRACE_MS) room.recentNames.delete(n)
+            for (const [n, ts] of room.recentTokens) {
+              if (now - ts > REJOIN_GRACE_MS) room.recentTokens.delete(n)
             }
           }
         }
@@ -432,7 +438,7 @@ function attachRelay(httpServer: ReturnType<typeof createHttpServer>): IoServer 
     socket.on('room:leave', () => leaveRoom())
 
     socket.on('state:update', (raw: unknown) => {
-      if (!currentRoom || !peer) return
+      if (!currentRoom || !peer || !rooms.get(currentRoom)?.peers.has(socket.id)) return
       if (!allow(`${socket.id}:state`, 60, 10_000)) return
       const data = (raw ?? {}) as Record<string, unknown>
       if (typeof data.micOn === 'boolean') peer.micOn = data.micOn
@@ -485,8 +491,12 @@ function attachRelay(httpServer: ReturnType<typeof createHttpServer>): IoServer 
         targetSocket.data.kicked = true
       }
       const kickedPeer = room.peers.get(target)
-      if (kickedPeer) room.recentNames.delete(kickedPeer.name)
+      if (targetSocket?.data.rejoinToken) room.recentTokens.delete(targetSocket.data.rejoinToken)
       room.peers.delete(target)
+      if (room.music?.peerId === target) {
+        room.music = null
+        io.to(currentRoom).emit('music:state', { action: 'stop', peerId: target })
+      }
       socket.to(currentRoom).emit('peer:left', { peerId: target })
       broadcastPresence(currentRoom)
     })
@@ -503,7 +513,7 @@ function attachRelay(httpServer: ReturnType<typeof createHttpServer>): IoServer 
     // ---- Listen together (control metadata only — audio is P2P) ----
 
     socket.on('music:state', (raw: unknown) => {
-      if (!currentRoom) return
+      if (!currentRoom || !rooms.get(currentRoom)?.peers.has(socket.id)) return
       if (!allow(`${socket.id}:music`, 40, 10_000)) return
       const room = rooms.get(currentRoom)
       if (!room) return
@@ -557,7 +567,7 @@ function attachRelay(httpServer: ReturnType<typeof createHttpServer>): IoServer 
       const data = (raw ?? {}) as Record<string, unknown>
       const to = safeString(data.to, 40)
       const sdp = safeString(data.sdp, 20000)
-      if (to && sdp) io.to(to).emit('rtc:offer', { from: socket.id, sdp })
+      if (currentRoom && rooms.get(currentRoom)?.peers.has(socket.id) && to !== socket.id && rooms.get(currentRoom)?.peers.has(to) && sdp) io.to(to).emit('rtc:offer', { from: socket.id, sdp })
     })
 
     socket.on('rtc:answer', (raw: unknown) => {
@@ -565,14 +575,14 @@ function attachRelay(httpServer: ReturnType<typeof createHttpServer>): IoServer 
       const data = (raw ?? {}) as Record<string, unknown>
       const to = safeString(data.to, 40)
       const sdp = safeString(data.sdp, 20000)
-      if (to && sdp) io.to(to).emit('rtc:answer', { from: socket.id, sdp })
+      if (currentRoom && rooms.get(currentRoom)?.peers.has(socket.id) && to !== socket.id && rooms.get(currentRoom)?.peers.has(to) && sdp) io.to(to).emit('rtc:answer', { from: socket.id, sdp })
     })
 
     socket.on('rtc:ice', (raw: unknown) => {
       if (!allow(`${socket.id}:rtc`, 240, 10_000)) return
       const data = (raw ?? {}) as Record<string, unknown>
       const to = safeString(data.to, 40)
-      if (to) socket.to(to).emit('rtc:ice', { from: socket.id, candidate: data.candidate })
+      if (currentRoom && rooms.get(currentRoom)?.peers.has(socket.id) && to !== socket.id && rooms.get(currentRoom)?.peers.has(to)) socket.to(to).emit('rtc:ice', { from: socket.id, candidate: data.candidate })
     })
 
     // ---- Receive-side video interest (tile visibility / speaker shedding) ----
@@ -581,7 +591,7 @@ function attachRelay(httpServer: ReturnType<typeof createHttpServer>): IoServer 
     // peers who are not watched — sender-side CPU and mesh upload drop with
     // zero renegotiation. Payload is a small id list, re-sanitized here.
     socket.on('video:wish', (raw: unknown) => {
-      if (!currentRoom || !peer) return
+      if (!currentRoom || !peer || !rooms.get(currentRoom)?.peers.has(socket.id)) return
       if (!allow(`${socket.id}:chat`, 25, 10_000)) return
       const data = (raw ?? {}) as Record<string, unknown>
       const list = Array.isArray(data.targets) ? data.targets : []
@@ -595,7 +605,7 @@ function attachRelay(httpServer: ReturnType<typeof createHttpServer>): IoServer 
     // ---- Chat (kilobytes of text, relayed) ----
 
     socket.on('chat:message', (raw: unknown) => {
-      if (!currentRoom || !peer) return
+      if (!currentRoom || !peer || !rooms.get(currentRoom)?.peers.has(socket.id)) return
       if (!allow(`${socket.id}:chat`, 25, 10_000)) return
       const data = (raw ?? {}) as Record<string, unknown>
       const text = safeString(data.text, 500).trim()
@@ -618,6 +628,18 @@ function attachRelay(httpServer: ReturnType<typeof createHttpServer>): IoServer 
         ...(replyTo ? { replyTo } : {}),
       }
       io.to(currentRoom).emit('chat:message', msg)
+      socket.emit('chat:sent', { id: msg.id })
+    })
+
+    socket.on('chat:typing', (raw: unknown) => {
+      if (!currentRoom || !peer || !rooms.get(currentRoom)?.peers.has(socket.id)) return
+      if (!allow(`${socket.id}:chat-typing`, 8, 5_000)) return
+      const data = (raw ?? {}) as Record<string, unknown>
+      socket.to(currentRoom).emit('chat:typing', {
+        peerId: socket.id,
+        name: peer.name,
+        typing: data.typing === true,
+      })
     })
 
     socket.on('disconnect', () => {

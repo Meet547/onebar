@@ -13,6 +13,7 @@
 export type LevelListener = (level: number) => void
 
 interface Source {
+  node: MediaStreamAudioSourceNode
   analyser: AnalyserNode
   data: Uint8Array<ArrayBuffer>
   /** Smoothed loudness 0..1 — fast attack, slow decay. */
@@ -97,6 +98,7 @@ export function trackAudio(peerId: string, stream: MediaStream | null) {
   const existing = sources.get(peerId)
   if (existing) {
     try {
+      existing.node.disconnect()
       existing.analyser.disconnect()
     } catch {
       /* ignore */
@@ -118,6 +120,7 @@ export function trackAudio(peerId: string, stream: MediaStream | null) {
     node.connect(analyser)
     if (silentOut) analyser.connect(silentOut)
     sources.set(peerId, {
+      node,
       analyser,
       data: new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount)),
       level: 0,
@@ -132,6 +135,7 @@ export function trackAudio(peerId: string, stream: MediaStream | null) {
 export function clearAllAudio() {
   for (const [, src] of sources) {
     try {
+      src.node.disconnect()
       src.analyser.disconnect()
     } catch {
       /* ignore */
@@ -139,6 +143,9 @@ export function clearAllAudio() {
   }
   sources.clear()
   stopIfIdle()
+  if (ctx) void ctx.close().catch(() => undefined)
+  ctx = null
+  silentOut = null
 }
 
 function dispatch(peerId: string, level: number) {

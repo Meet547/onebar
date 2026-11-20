@@ -78,14 +78,17 @@ export async function GET() {
     )
   }
 
+  let cacheTtl = 3600
   let username = process.env.TURN_USERNAME ?? ''
   let credential = process.env.TURN_CREDENTIAL ?? ''
 
   const secret = process.env.TURN_SECRET
   if (secret) {
-    const ttl = Math.max(300, Number(process.env.TURN_CREDENTIAL_TTL ?? 21_600))
+    const configured = Number(process.env.TURN_CREDENTIAL_TTL ?? 21_600)
+    const ttl = Number.isFinite(configured) ? Math.floor(Math.max(300, Math.min(86_400, configured))) : 21_600
     username = String(Math.floor(Date.now() / 1000) + ttl)
     credential = createHmac('sha1', secret).update(username).digest('base64')
+    cacheTtl = Math.min(3600, ttl - 60)
   }
 
   if (!username || !credential) {
@@ -118,7 +121,7 @@ export async function GET() {
   return NextResponse.json(
     {
       iceServers: [...STUN_SERVERS, { urls, username, credential }],
-      ttl: 3600,
+      ttl: cacheTtl,
       turn: true,
     },
     { headers: noStore },

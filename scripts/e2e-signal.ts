@@ -5,7 +5,7 @@
  *  leave + host promotion + peer:left. Exits non-zero on any failure. */
 import { io, type Socket } from 'socket.io-client'
 
-const BASE = 'http://127.0.0.1:3111'
+const BASE = process.env.BASE || 'http://127.0.0.1:3111'
 const ROOM = `e2e-${Math.random().toString(36).slice(2, 8)}-relay`
 
 let pass = 0
@@ -46,7 +46,8 @@ async function main() {
   ok('two clients connected through /signal/ rewrite', A.connected && B.connected)
 
   // version handshake both sides
-  const vcA = await new Promise<any>((res) => A.once('version:current', res).emit('version:hello', { client: 'b98620d' }))
+  const health = await (await fetch(`${BASE}/api/health`)).json() as { version: string }
+  const vcA = await new Promise<any>((res) => A.once('version:current', res).emit('version:hello', { client: health.version }))
   ok('version:hello → version:current (clientMatches)', typeof vcA?.server === 'string' && vcA.clientMatches === true, JSON.stringify(vcA))
 
   // A joins first → becomes host
@@ -89,9 +90,20 @@ async function main() {
 
   // chat relay
   const chP = onceEvent(B, 'chat:message')
+  const sentP = onceEvent(A, 'chat:sent')
   A.emit('chat:message', { text: 'hello relay' })
   const ch = await chP
   ok('chat:message relayed', ch?.text === 'hello relay' && (ch?.peerId === A.id || ch?.from === A.id), JSON.stringify(ch))
+  const sent = await sentP
+  ok('chat:sent acknowledged', typeof sent?.id === 'string' && sent.id === ch?.id)
+  const typingP = onceEvent(B, 'chat:typing')
+  A.emit('chat:typing', { typing: true })
+  const typing = await typingP
+  ok('chat:typing relayed with peer identity', typing?.peerId === A.id && typing?.name === 'Alice' && typing?.typing === true)
+  const stoppedTypingP = onceEvent(B, 'chat:typing')
+  A.emit('chat:typing', { typing: false })
+  const stoppedTyping = await stoppedTypingP
+  ok('chat:typing stopped', stoppedTyping?.peerId === A.id && stoppedTyping?.typing === false)
 
   // host controls: A mutes B, locks room
   const fmP = onceEvent(B, 'host:force-mute')

@@ -6,10 +6,8 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  /* System font stack — zero webfont bytes on the wire. Manrope's geometric
-     feel is approximated by the platform UI font; canvas overlays in
-     src/lib/call/test-stream.ts use the same stack (kept in sync). */
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  /* Manrope is self-hosted by next/font; system UI remains the metric fallback. */
+  --font-sans: var(--font-manrope), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   --color-ring: var(--ring);
   --color-input: var(--input);
@@ -29,14 +27,14 @@
   --color-card: var(--card);
   /* iOS system palette — green/red are status colors, black is the brand */
   --color-ios-green: #30d158;
-  --color-ios-red: #ff3b30;
+  --color-ios-red: #d62f25;
   --color-ios-gray: #f5f5f7;
   --color-ios-gray2: #e8e8ed;
   --color-ink: #0d0d0f;
   --color-ink-soft: #3c3c43;
   --color-label: #1c1c1e;
-  --color-secondary-label: #7c7c82;
-  --color-tertiary-label: #a9a9b0;
+  --color-secondary-label: #62626a;
+  --color-tertiary-label: #62626a;
 }
 
 :root {
@@ -45,30 +43,51 @@
   /* ---- Spacing rhythm: 4 / 8 / 12 / 16 / 20 / 24 / 32 ---- */
   /* ---- Motion ---- */
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
-  --ease-spring: cubic-bezier(0.34, 1.35, 0.64, 1);
   --dur-press: 130ms;
   --dur-move: 220ms;
   --dur-sheet: 340ms;
 
-  --radius: 0.875rem;
-  --background: #ffffff;
-  --foreground: #1c1c1e;
-  --card: #ffffff;
-  --card-foreground: #1c1c1e;
-  --popover: #ffffff;
-  --popover-foreground: #1c1c1e;
-  --primary: #0d0d0f;
-  --primary-foreground: #ffffff;
-  --secondary: #f5f5f7;
-  --secondary-foreground: #1c1c1e;
-  --muted: #f5f5f7;
-  --muted-foreground: #7c7c82;
-  --accent: #f5f5f7;
-  --accent-foreground: #1c1c1e;
-  --destructive: #ff3b30;
-  --border: #e8e8ed;
-  --input: #e8e8ed;
-  --ring: #a9a9b0;
+  --radius: 0.375rem;
+  --background: oklch(99.2% 0.003 270);
+  --foreground: oklch(20% 0.008 270);
+  --card: oklch(100% 0 0);
+  --card-foreground: oklch(20% 0.008 270);
+  --popover: oklch(100% 0 0);
+  --popover-foreground: oklch(20% 0.008 270);
+  --primary: oklch(20% 0.008 270);
+  --primary-foreground: oklch(100% 0 0);
+  --secondary: oklch(96.8% 0.004 270);
+  --secondary-foreground: oklch(20% 0.008 270);
+  --muted: oklch(96.8% 0.004 270);
+  --muted-foreground: oklch(48% 0.012 270);
+  --accent: oklch(96.8% 0.004 270);
+  --accent-foreground: oklch(20% 0.008 270);
+  --destructive: oklch(54% 0.19 28);
+  --border: rgb(0 0 0 / 0.10);
+  --input: rgb(0 0 0 / 0.12);
+  --ring: oklch(48% 0.012 270);
+}
+
+.dark {
+  color-scheme: dark;
+  --background: oklch(18% 0.012 270);
+  --foreground: oklch(96% 0.004 270);
+  --card: oklch(24% 0.014 270);
+  --card-foreground: oklch(96% 0.004 270);
+  --popover: oklch(27% 0.014 270);
+  --popover-foreground: oklch(96% 0.004 270);
+  --primary: oklch(91% 0.006 270);
+  --primary-foreground: oklch(20% 0.008 270);
+  --secondary: oklch(29% 0.012 270);
+  --secondary-foreground: oklch(94% 0.004 270);
+  --muted: oklch(29% 0.012 270);
+  --muted-foreground: oklch(72% 0.01 270);
+  --accent: oklch(31% 0.014 270);
+  --accent-foreground: oklch(94% 0.004 270);
+  --destructive: oklch(64% 0.18 28);
+  --border: rgb(255 255 255 / 0.12);
+  --input: rgb(255 255 255 / 0.16);
+  --ring: oklch(72% 0.01 270);
 }
 
 @layer base {
@@ -104,15 +123,73 @@
 
 /* ---------- Buttons ---------- */
 
-/* Primary pill — solid black, flat, press-animated */
+/* Primary action — solid black, crisp corners, press-animated */
 .ios-pill {
-  @apply inline-flex h-12 items-center justify-center gap-2 rounded-full bg-[#0d0d0f] px-7
+  @apply inline-flex h-12 items-center justify-center gap-2 rounded-md bg-[#0d0d0f] px-7
     text-[15px] font-semibold text-white select-none;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
   transition:
-    transform var(--dur-press) var(--ease-spring),
+    transform var(--dur-press) var(--ease-out),
     background-color var(--dur-press) var(--ease-out),
     opacity var(--dur-press) var(--ease-out);
+}
+
+/* Home experience: quiet editorial backdrop and a tactile, nested card. */
+.pico-home {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse at 50% 0%, oklch(96% 0.035 155 / 0.72), transparent 48%),
+    linear-gradient(180deg in oklch, oklch(99.5% 0.004 270), oklch(97.5% 0.008 270));
+}
+.pico-home::before,
+.pico-home::after {
+  position: absolute;
+  z-index: -1;
+  content: '';
+  pointer-events: none;
+  border-radius: 50%;
+  filter: blur(1px);
+}
+.pico-home::before {
+  width: 22rem;
+  height: 22rem;
+  top: 10%;
+  left: -17rem;
+  background: oklch(91% 0.07 155 / 0.24);
+}
+.pico-home::after {
+  width: 26rem;
+  height: 26rem;
+  right: -21rem;
+  bottom: 4%;
+  background: oklch(91% 0.045 245 / 0.20);
+}
+.pico-home-card {
+  border: 1px solid rgb(0 0 0 / 0.08);
+  border-radius: 28px;
+  background: rgb(255 255 255 / 0.76);
+  box-shadow: 0 24px 80px oklch(30% 0.02 270 / 0.08), 0 2px 8px rgb(0 0 0 / 0.035);
+  -webkit-backdrop-filter: blur(24px) saturate(150%);
+  backdrop-filter: blur(24px) saturate(150%);
+}
+.pico-carousel {
+  -webkit-mask-image: linear-gradient(90deg, transparent, black 15% 85%, transparent);
+  mask-image: linear-gradient(90deg, transparent, black 15% 85%, transparent);
+}
+.dark .glass {
+  background: oklch(27% 0.014 270 / 0.84);
+}
+.dark .pico-home {
+  background:
+    radial-gradient(ellipse at 50% 0%, oklch(38% 0.08 155 / 0.25), transparent 48%),
+    linear-gradient(180deg in oklch, oklch(19% 0.014 270), oklch(15% 0.014 270));
+}
+.dark .pico-home-card {
+  border-color: rgb(255 255 255 / 0.12);
+  background: oklch(25% 0.014 270 / 0.88);
+  box-shadow: 0 24px 80px rgb(0 0 0 / 0.28), inset 0 1px rgb(255 255 255 / 0.05);
 }
 .ios-pill:hover {
   background: #26262b;
@@ -122,16 +199,18 @@
   background: #3a3a40;
 }
 .ios-pill:disabled {
-  opacity: 0.55;
+  background: oklch(88% 0.004 270) !important;
+  color: oklch(40% 0.012 270) !important;
+  opacity: 1 !important;
   transform: none;
 }
 
-/* Secondary pill — light gray */
+/* Secondary action — light gray */
 .ios-pill-soft {
-  @apply inline-flex h-12 items-center justify-center gap-2 rounded-full bg-[#f5f5f7] px-7
+  @apply inline-flex h-12 items-center justify-center gap-2 rounded-md bg-[#f5f5f7] px-7
     text-[15px] font-semibold text-[#0d0d0f] select-none;
   transition:
-    transform var(--dur-press) var(--ease-spring),
+    transform var(--dur-press) var(--ease-out),
     background-color var(--dur-press) var(--ease-out);
 }
 .ios-pill-soft:hover {
@@ -141,12 +220,12 @@
   transform: scale(0.96);
 }
 
-/* Circular control button (52px) */
+/* Compact control button (52px) */
 .ios-control {
-  @apply relative flex h-[52px] w-[52px] items-center justify-center rounded-full
+  @apply relative flex h-[52px] w-[52px] items-center justify-center rounded-md
     bg-[#f5f5f7] text-[#0d0d0f];
   transition:
-    transform var(--dur-press) var(--ease-spring),
+    transform var(--dur-press) var(--ease-out),
     background-color var(--dur-press) var(--ease-out),
     color var(--dur-press) var(--ease-out);
 }
@@ -164,13 +243,23 @@
   background: #26262b;
 }
 .ios-control-danger {
-  @apply bg-[#ff3b30] text-white;
+  @apply bg-[#d62f25] text-white;
 }
 
-/* Universal press feedback for small round buttons */
+@media (min-width: 768px) {
+  .control-bar .control-action {
+    height: 60px;
+    width: 58px;
+    flex-direction: column;
+    gap: 5px;
+    border-radius: 6px;
+  }
+}
+
+/* Universal press feedback for compact controls */
 .press {
   transition:
-    transform var(--dur-press) var(--ease-spring),
+    transform var(--dur-press) var(--ease-out),
     background-color var(--dur-press) var(--ease-out);
 }
 .press:active {
@@ -179,9 +268,9 @@
 
 /* Soft square icon button (sheets, header) */
 .ios-square {
-  @apply flex h-8 w-8 items-center justify-center rounded-full bg-[#f5f5f7] text-[#7c7c82];
+  @apply flex h-8 w-8 items-center justify-center rounded-md bg-[#f5f5f7] text-[#62626a];
   transition:
-    transform var(--dur-press) var(--ease-spring),
+    transform var(--dur-press) var(--ease-out),
     background-color var(--dur-press) var(--ease-out),
     color var(--dur-press) var(--ease-out);
 }
@@ -195,15 +284,31 @@
 
 /* ---------- Inputs ---------- */
 .ios-field {
-  @apply h-12 w-full rounded-2xl border border-black/[0.07] bg-[#f5f5f7] px-4
+  @apply h-12 w-full rounded-md border border-black/[0.07] bg-[#f5f5f7] px-4
     text-[15px] text-[#1c1c1e] outline-none;
   transition:
     border-color var(--dur-move) var(--ease-out),
     background-color var(--dur-move) var(--ease-out),
     box-shadow var(--dur-move) var(--ease-out);
 }
+.pico-home .ios-field {
+  border-color: rgb(0 0 0 / 0.09);
+  border-radius: 14px;
+  background: oklch(97.5% 0.005 270 / 0.88);
+}
+.pico-home .ios-field:focus {
+  border-color: oklch(63% 0.14 155 / 0.65);
+  background: white;
+  box-shadow: 0 0 0 4px oklch(70% 0.14 155 / 0.12);
+}
+.dark .pico-home .ios-field {
+  border-color: rgb(255 255 255 / 0.10);
+  background: oklch(30% 0.012 270);
+  color: var(--foreground);
+}
+.dark .pico-home .ios-field:focus { background: oklch(33% 0.012 270); }
 .ios-field::placeholder {
-  color: #a9a9b0;
+  color: #62626a;
 }
 .ios-field:focus {
   border-color: rgba(13, 13, 15, 0.28);
@@ -276,7 +381,7 @@
   }
 }
 .pico-sheet-up {
-  animation: pico-sheet-up var(--dur-sheet) var(--ease-spring) both;
+  animation: pico-sheet-up var(--dur-sheet) var(--ease-out) both;
 }
 
 @keyframes pico-icon-swap {
@@ -290,8 +395,25 @@
   }
 }
 .pico-icon-swap {
-  animation: pico-icon-swap var(--dur-move) var(--ease-spring) both;
+  animation: pico-icon-swap var(--dur-move) var(--ease-out) both;
 }
+.pico-icon-swap svg { transition: filter var(--dur-move) var(--ease-out), opacity var(--dur-move) var(--ease-out); }
+.pico-icon-swap[data-outgoing='true'] svg { filter: blur(4px); opacity: 0; }
+
+@keyframes pico-typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.45; }
+  30% { transform: translateY(-2px); opacity: 1; }
+}
+.pico-typing-dots { display: inline-flex; align-items: center; gap: 3px; }
+.pico-typing-dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: currentColor;
+  animation: pico-typing-bounce 900ms cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+.pico-typing-dots i:nth-child(2) { animation-delay: 120ms; }
+.pico-typing-dots i:nth-child(3) { animation-delay: 240ms; }
 
 @keyframes pico-breathe {
   0%,
@@ -318,7 +440,7 @@
   }
 }
 .pico-toast-in {
-  animation: pico-toast-in 0.3s var(--ease-spring) both;
+  animation: pico-toast-in 0.3s var(--ease-out) both;
 }
 
 /* One-shot highlight when jumping to a replied-to message */
@@ -362,7 +484,7 @@
 }
 .pico-wave-bar {
   transform-origin: center;
-  animation: pico-wave 1.15s var(--ease-spring) infinite;
+  animation: pico-wave 1.15s var(--ease-out) infinite;
 }
 
 /* Voice meter bars (mini equalizer in a tile chip) */
@@ -393,7 +515,7 @@
   content: '';
   @apply absolute left-[2px] block h-[27px] w-[27px] rounded-full bg-white;
   box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2), 0 0 1px rgba(0, 0, 0, 0.1);
-  transition: transform var(--dur-move) var(--ease-spring);
+  transition: transform var(--dur-move) var(--ease-out);
 }
 .ios-switch[data-on='true'] {
   background: #30d158;
@@ -440,7 +562,7 @@
   background: #fff;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25), 0 0 1px rgba(0, 0, 0, 0.15);
   cursor: pointer;
-  transition: transform var(--dur-press) var(--ease-spring);
+  transition: transform var(--dur-press) var(--ease-out);
 }
 .ios-range::-webkit-slider-thumb:active {
   transform: scale(1.15);
@@ -461,6 +583,11 @@
     height: 40px;
     width: 40px;
   }
+  .control-bar .control-action {
+    flex-direction: row;
+    gap: 0;
+    border-radius: 6px;
+  }
   .control-bar .ios-control svg {
     height: 17px;
     width: 17px;
@@ -473,3 +600,17 @@
 }
 
 /* dev nudge */
+
+/* Keyboard users need a visible focus target on every interactive control. */
+:where(button, input, select, textarea, a):focus-visible {
+  outline: 2px solid #167c38;
+  outline-offset: 3px;
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

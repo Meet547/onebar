@@ -21,6 +21,7 @@ services:
         NEXT_PUBLIC_SOCKET_PATH: /socket.io
         NEXT_PUBLIC_ROOM_INFO_URL: ${PICO_ROOM_INFO_URL:-/info}
         NEXT_PUBLIC_SITE_URL: https://${PICO_DOMAIN}
+        PICO_VERSION: ${PICO_VERSION:-}
     image: pico-app
     restart: unless-stopped
     expose:
@@ -34,6 +35,9 @@ services:
       # The relay is its own supervised container here — the in-app keeper
       # would find no source tree to spawn and is switched off.
       - PICO_EMBEDDED_RELAY=0
+      - RELAY_UPSTREAM=http://signaling:3003
+      - INFO_UPSTREAM=http://signaling:3004
+      - PICO_VERSION=${PICO_VERSION:-}
     networks:
       - pico
 
@@ -49,11 +53,12 @@ services:
       - INFO_PORT=3004
       - SOCKET_PATH=/socket.io
       - ORIGIN=https://${PICO_DOMAIN}
+      - PICO_VERSION=${PICO_VERSION:-}
     networks:
       - pico
 
   coturn:
-    image: coturn/coturn:latest
+    image: coturn/coturn:4.19.0-r0
     restart: unless-stopped
     # host networking: TURN must see real client IPs and bind the UDP relay range
     network_mode: host

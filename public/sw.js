@@ -68,7 +68,7 @@ async function pruneVersions() {
     shellName(st.previous),
     staticName(st.previous),
   ])
-  const keys = await caches.keys()
+  const keys = await caches.keys().catch(() => [])
   await Promise.all(
     keys
       .filter((k) => /^pico-(shell|static)-/.test(k) && !keep.has(k))
@@ -115,6 +115,17 @@ self.addEventListener('activate', (event) => {
   )
 })
 
+/** Cache storage is optional: quota/private-mode failures must not break online calls. */
+async function openCache(name) {
+  try { return await caches.open(name) } catch { return null }
+}
+async function matchCache(cache, key) {
+  try { return cache ? await cache.match(key) : null } catch { return null }
+}
+async function putCache(cache, key, response) {
+  try { if (cache) await cache.put(key, response) } catch { /* storage is best effort */ }
+}
+
 self.addEventListener('fetch', (event) => {
   const req = event.request
   if (req.method !== 'GET') return
@@ -125,8 +136,10 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(
       (async () => {
         const st = await loadState()
-        const cache = await caches.open(shellName(st.version))
-        const cached = await cache.match(req, { ignoreSearch: true })
+        const cache = await openCache(shellName(st.version))
+        // Room codes are URL credentials; do not persist them as cache keys.
+        const shellKey = url.origin + url.pathname
+        const cached = await matchCache(cache, shellKey)
         const revalidate = fetch(req)
           .then(async (res) => {
             if (res.ok) {
@@ -134,8 +147,8 @@ self.addEventListener('fetch', (event) => {
               // navigation, then file the shell under that version.
               const v = res.headers.get('x-pico-version')
               const st2 = await adoptVersion(v)
-              const freshCache = await caches.open(shellName(st2.version))
-              await freshCache.put(req, res.clone())
+              const freshCache = await openCache(shellName(st2.version))
+              await putCache(freshCache, shellKey, res.clone())
             }
             return res
           })
@@ -154,19 +167,19 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(
       (async () => {
         const st = await loadState()
-        const cache = await caches.open(staticName(st.version))
-        const hit = await cache.match(req)
+        const cache = await openCache(staticName(st.version))
+        const hit = await matchCache(cache, req)
         if (hit) return hit
         // Old tab on the previous version? Serve its chunk from the previous
         // cache before touching the network — this is what keeps an old
         // shell working after a deploy swapped the hashed asset names.
         if (st.previous) {
-          const prev = await caches.open(staticName(st.previous))
-          const prevHit = await prev.match(req)
+          const prev = await openCache(staticName(st.previous))
+          const prevHit = await matchCache(prev, req)
           if (prevHit) return prevHit
         }
         const res = await fetch(req)
-        if (res.ok) cache.put(req, res.clone())
+        if (res.ok) event.waitUntil(putCache(cache, req, res.clone()))
         return res
       })(),
     )

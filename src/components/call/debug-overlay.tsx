@@ -51,13 +51,13 @@ export function DebugOverlay() {
   }
 
   return (
-    <div className="fixed left-2 top-2 z-50 max-w-[280px] rounded-xl bg-black/85 p-3 font-mono text-[10px] leading-relaxed text-lime-300 shadow-xl">
+    <div className="fixed left-2 top-2 z-50 max-w-[280px] rounded-md bg-black/85 p-3 font-mono text-[10px] leading-relaxed text-lime-300 shadow-xl">
       <div className="mb-1 flex items-center justify-between font-bold text-white">
         <span>pico debug</span>
         <button
           type="button"
           onClick={copy}
-          className="rounded border border-white/25 px-1.5 py-0.5 text-[9px] font-semibold normal-case text-white hover:bg-white/15"
+          className="rounded-sm border border-white/25 px-1.5 py-0.5 text-[9px] font-semibold normal-case text-white hover:bg-white/15"
         >
           {copied ? 'copied ✓' : 'copy report'}
         </button>

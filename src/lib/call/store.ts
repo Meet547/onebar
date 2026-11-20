@@ -62,6 +62,7 @@ interface CallStore {
   self: SelfState
   peers: Record<string, PeerState>
   chat: ChatMessage[]
+  typingPeers: Record<string, { name: string; at: number }>
   unreadChat: number
   preset: QualityPreset
   effectiveLabel: string
@@ -93,6 +94,8 @@ interface CallStore {
   patchPeer: (peerId: string, partial: Partial<PeerState>) => void
   bumpPeerStream: (peerId: string, has: boolean) => void
   addChat: (msg: ChatMessage) => void
+  setTypingPeer: (peerId: string, name: string, at: number) => void
+  clearTypingPeer: (peerId: string) => void
   clearUnread: () => void
   setPreset: (p: QualityPreset) => void
   setEffectiveLabel: (l: string) => void
@@ -119,6 +122,7 @@ export const useCallStore = create<CallStore>((set, get) => ({
   self: initialSelf,
   peers: {},
   chat: [],
+  typingPeers: {},
   unreadChat: 0,
   preset: 'balanced',
   effectiveLabel: '',
@@ -171,6 +175,13 @@ export const useCallStore = create<CallStore>((set, get) => ({
       unreadChat:
         msg.from !== s.self.id && msg.from !== 'system' ? s.unreadChat + 1 : s.unreadChat,
     })),
+  setTypingPeer: (peerId, name, at) => set((s) => ({ typingPeers: { ...s.typingPeers, [peerId]: { name, at } } })),
+  clearTypingPeer: (peerId) => set((s) => {
+    if (!s.typingPeers[peerId]) return s
+    const typingPeers = { ...s.typingPeers }
+    delete typingPeers[peerId]
+    return { typingPeers }
+  }),
   clearUnread: () => set({ unreadChat: 0 }),
   setPreset: (p) => set({ preset: p }),
   setEffectiveLabel: (l) => set({ effectiveLabel: l }),
@@ -191,6 +202,7 @@ export const useCallStore = create<CallStore>((set, get) => ({
       self: { ...initialSelf, name: get().self.name },
       peers: {},
       chat: [],
+      typingPeers: {},
       unreadChat: 0,
       overallLevel: 3,
       bitrateKbps: 0,

@@ -1,3 +1,4 @@
+import { InvalidBody, readJsonObject } from '@/lib/request-body'
 import { NextResponse } from 'next/server'
 import { RateLimiter } from '@/lib/health-token'
 
@@ -16,13 +17,11 @@ export async function POST(request: Request) {
   if (!limiter.allow()) {
     return new NextResponse(null, { status: 429, headers: { 'Cache-Control': 'no-store' } })
   }
-  let body: { msg?: unknown; stack?: unknown; url?: unknown; ver?: unknown }
+  let body: Record<string, unknown>
   try {
-    const raw = await request.text()
-    if (raw.length > 4096) return new NextResponse(null, { status: 413 })
-    body = JSON.parse(raw)
-  } catch {
-    return new NextResponse(null, { status: 400 })
+    body = await readJsonObject(request, 4096)
+  } catch (error) {
+    return new NextResponse(null, { status: error instanceof InvalidBody ? error.status : 400, headers: { 'Cache-Control': 'no-store' } })
   }
   const clean = (v: unknown, max: number) =>
     typeof v === 'string' ? v.replace(/[\r\n]+/g, ' ⏎ ').slice(0, max) : ''

@@ -25,7 +25,7 @@ export default function Error({
 
   return (
     <div className="flex min-h-[100dvh] flex-col items-center justify-center bg-white px-6">
-      <div className="pico-pop w-full max-w-[400px] rounded-[24px] border border-black/[0.05] bg-white p-8 text-center shadow-[0_8px_40px_rgba(0,0,0,0.08)]">
+      <div className="pico-pop w-full max-w-[400px] rounded-md border border-black/[0.05] bg-white p-8 text-center shadow-[0_8px_40px_rgba(0,0,0,0.08)]">
         <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-full bg-[#ff3b30]/10 text-[22px] font-bold text-[#ff3b30]">
           !
         </div>

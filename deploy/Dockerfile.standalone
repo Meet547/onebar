@@ -1,12 +1,4 @@
-# Pico — plain Next.js app container (the embedded relay runs inside it).
-# Reference for self-hosters; the recommended path is simply:
-#   bun install && bun run build && bun run start
-# The full multi-container stack (separate relay + TURN + Caddy) is in
-# docker-compose.yml next to this file.
-#
-# Build:  docker build -f deploy/Dockerfile.standalone -t pico-app .
-# Run:    docker run -p 3000:3000 pico-app
-
+# Build from the repository root; public client settings are build-time values.
 FROM oven/bun:1 AS deps
 WORKDIR /app
 COPY package.json bun.lock ./
@@ -16,16 +8,10 @@ FROM oven/bun:1 AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-
-# Public runtime config is baked into the client bundle at build time.
-ARG NEXT_PUBLIC_SIGNALING_URL=/
-ARG NEXT_PUBLIC_SOCKET_PATH=/socket.io
+ARG NEXT_PUBLIC_SIGNALING_URL=
+ARG NEXT_PUBLIC_SOCKET_PATH=/signal/
 ARG NEXT_PUBLIC_ROOM_INFO_URL=/info
 ARG NEXT_PUBLIC_SITE_URL=http://localhost:3000
-# Deployment version: must be passed to the build AND to the runtime stage
-# (below) so the client bundle, the x-pico-version header and /api/health
-# all report the same value — that agreement is what the socket version
-# handshake and the service worker's per-version caches rely on.
 ARG PICO_VERSION=
 ENV NEXT_PUBLIC_SIGNALING_URL=$NEXT_PUBLIC_SIGNALING_URL \
     NEXT_PUBLIC_SOCKET_PATH=$NEXT_PUBLIC_SOCKET_PATH \
@@ -33,31 +19,15 @@ ENV NEXT_PUBLIC_SIGNALING_URL=$NEXT_PUBLIC_SIGNALING_URL \
     NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL \
     PICO_VERSION=$PICO_VERSION \
     NEXT_TELEMETRY_DISABLED=1
-
-# Per-deploy version stamp, read at runtime by src/lib/server-version.ts
-# (the runner image has no git, so the FILE pins runtime to the build's
-# version). Explicit build arg wins; else the git short hash of the build
-# context; else loud warning — version falls back to package.json, which is
-# NOT unique per deploy, and check-live.sh will flag it.
-RUN if [ -n "$PICO_VERSION" ]; then \
-      printf '%s' "$PICO_VERSION" > .pico-version; \
-    elif command -v git >/dev/null 2>&1 && git rev-parse --short HEAD >/dev/null 2>&1; then \
-      git rev-parse --short HEAD > .pico-version; \
-    else \
-      echo "WARNING [pico]: no PICO_VERSION build arg and no git in the build context — version falls back to package.json (not unique per deploy). Deploy with: PICO_VERSION=\$(git rev-parse --short HEAD) docker compose up -d --build"; \
-    fi
-
 RUN bun run build
 
-FROM node:22-alpine AS runner
+# Match the builder's glibc runtime for native modules such as sharp.
+FROM node:22-bookworm-slim AS runner
 WORKDIR /app
-ENV NODE_ENV=production \
-    PORT=3000 \
-    HOSTNAME=0.0.0.0 \
-    NEXT_TELEMETRY_DISABLED=1
-# Runtime half of the version contract (see the builder stage above).
-ARG PICO_VERSION=
-ENV PICO_VERSION=$PICO_VERSION
-COPY --from=builder /app ./
+ENV NODE_ENV=production PORT=3000 HOSTNAME=0.0.0.0 NEXT_TELEMETRY_DISABLED=1
+COPY --from=builder --chown=node:node /app/.next/standalone ./
+USER node
 EXPOSE 3000
-CMD ["npx", "next", "start"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD node -e "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+CMD ["node", "server.js"]

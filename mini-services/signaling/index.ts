@@ -30,7 +30,7 @@ import { Server, type Socket } from 'socket.io'
 const PORT = Number(process.env.PORT ?? 3003)
 const INFO_PORT = Number(process.env.INFO_PORT ?? 3004)
 const SOCKET_PATH = process.env.SOCKET_PATH ?? '/'
-const MAX_PEERS_PER_ROOM = 8
+const MAX_PEERS_PER_ROOM = 10
 const REJOIN_GRACE_MS = 120_000
 
 // ---------------- info + health probe (own tiny server) ----------------
@@ -98,7 +98,7 @@ const io = new Server(httpServer, {
   cors: { origin: (process.env.ORIGIN ?? '*').split(',').map((s) => s.trim()), methods: ['GET', 'POST'] },
   // Origin gate on the WS upgrade (same rationale as src/lib/relay-server.ts):
   // fail closed — same-origin always, cross-origin only via the ORIGIN list.
-  allowRequest: originGuard(),
+  allowRequest: originGuard,
   pingTimeout: 45000,
   pingInterval: 20000,
   // Keep the socket payload tiny; websocket transport only after handshake
@@ -143,7 +143,7 @@ interface Room {
   passwordHash: string
   music: MusicSession | null
   /** Names seen recently — lets reconnects back into a locked room. */
-  recentNames: Map<string, number>
+  recentTokens: Map<string, number>
 }
 
 const rooms = new Map<string, Room>()
@@ -151,7 +151,7 @@ const rooms = new Map<string, Room>()
 const getRoom = (roomId: string): Room => {
   let room = rooms.get(roomId)
   if (!room) {
-    room = { peers: new Map(), hostId: null, locked: false, passwordHash: '', music: null, recentNames: new Map() }
+    room = { peers: new Map(), hostId: null, locked: false, passwordHash: '', music: null, recentTokens: new Map() }
     rooms.set(roomId, room)
   }
   return room
@@ -253,7 +253,7 @@ io.on('connection', (socket: Socket) => {
   // package that cannot import from the app source tree.
   const SERVER_VERSION = process.env.PICO_VERSION || null
   socket.on('version:hello', (raw: unknown) => {
-    const client = (raw as { client?: string } | null)?.client ?? null
+    const client = safeString((raw as { client?: unknown } | null)?.client, 80) || null
     const clientMatches = !client || !SERVER_VERSION || client === SERVER_VERSION
     socket.emit('version:current', { server: SERVER_VERSION, clientMatches })
   })
@@ -264,7 +264,12 @@ io.on('connection', (socket: Socket) => {
       const roomId = safeString(data.roomId, 64).trim()
       const name = safeString(data.name, 24).trim() || 'Guest'
       const passwordHash = safeString(data.passwordHash, 64)
-      if (!roomId) return
+      const rejoinToken = safeString(data.rejoinToken, 64)
+      if (!allow(`${socket.id}:join`, 20, 10_000)) {
+        ack?.({ ok: false, reason: 'Too many join attempts — try again shortly' })
+        return
+      }
+      if (!roomId) { ack?.({ ok: false, reason: 'Invalid room code' }); return }
       // Room ids are join keys — restrict the charset to keep URLs clean.
       if (!/^[a-z0-9-]{4,64}$/.test(roomId)) {
         ack?.({ ok: false, reason: 'Invalid room code' })
@@ -294,14 +299,14 @@ io.on('connection', (socket: Socket) => {
       if (
         room.locked &&
         !room.peers.has(socket.id) &&
-        !(name && Date.now() - (room.recentNames.get(name) ?? 0) < REJOIN_GRACE_MS)
+        !(rejoinToken && room.recentTokens.has(rejoinToken) && Date.now() - room.recentTokens.get(rejoinToken)! < REJOIN_GRACE_MS)
       ) {
         ack?.({ ok: false, reason: 'The host locked this call' })
         return
       }
 
       if (room.peers.size >= MAX_PEERS_PER_ROOM && !room.peers.has(socket.id)) {
-        ack?.({ ok: false, reason: 'Room is full (8 people max)' })
+        ack?.({ ok: false, reason: `Room is full (${MAX_PEERS_PER_ROOM} people max)` })
         return
       }
 
@@ -311,6 +316,7 @@ io.on('connection', (socket: Socket) => {
       }
 
       currentRoom = roomId
+      socket.data.rejoinToken = rejoinToken
       peer = { id: socket.id, name, micOn: true, camOn: true, sharing: false }
       room.peers.set(socket.id, peer)
       if (!room.hostId) room.hostId = socket.id
@@ -356,12 +362,12 @@ io.on('connection', (socket: Socket) => {
     }
     if (room) {
       room.peers.delete(socket.id)
-      if (peer?.name) {
-        room.recentNames.set(peer.name, Date.now())
-        if (room.recentNames.size > 100) {
+      if (socket.data.rejoinToken) {
+        room.recentTokens.set(socket.data.rejoinToken, Date.now())
+        if (room.recentTokens.size > 100) {
           const now = Date.now()
-          for (const [n, ts] of room.recentNames) {
-            if (now - ts > REJOIN_GRACE_MS) room.recentNames.delete(n)
+          for (const [n, ts] of room.recentTokens) {
+            if (now - ts > REJOIN_GRACE_MS) room.recentTokens.delete(n)
           }
         }
       }
@@ -385,7 +391,7 @@ io.on('connection', (socket: Socket) => {
   socket.on('room:leave', () => leaveRoom())
 
   socket.on('state:update', (raw: unknown) => {
-    if (!currentRoom || !peer) return
+    if (!currentRoom || !peer || !rooms.get(currentRoom)?.peers.has(socket.id)) return
     if (!allow(`${socket.id}:state`, 60, 10_000)) return
     const data = (raw ?? {}) as Record<string, unknown>
     if (typeof data.micOn === 'boolean') peer.micOn = data.micOn
@@ -438,8 +444,12 @@ io.on('connection', (socket: Socket) => {
       targetSocket.data.kicked = true
     }
     const kickedPeer = room.peers.get(target)
-    if (kickedPeer) room.recentNames.delete(kickedPeer.name)
+    if (targetSocket?.data.rejoinToken) room.recentTokens.delete(targetSocket.data.rejoinToken)
     room.peers.delete(target)
+      if (room.music?.peerId === target) {
+        room.music = null
+        io.to(currentRoom).emit('music:state', { action: 'stop', peerId: target })
+      }
     socket.to(currentRoom).emit('peer:left', { peerId: target })
     broadcastPresence(currentRoom)
   })
@@ -456,7 +466,7 @@ io.on('connection', (socket: Socket) => {
   // ---- Listen together (control metadata only — audio is P2P) ----
 
   socket.on('music:state', (raw: unknown) => {
-    if (!currentRoom) return
+    if (!currentRoom || !rooms.get(currentRoom)?.peers.has(socket.id)) return
     if (!allow(`${socket.id}:music`, 40, 10_000)) return
     const room = rooms.get(currentRoom)
     if (!room) return
@@ -510,7 +520,7 @@ io.on('connection', (socket: Socket) => {
     const data = (raw ?? {}) as Record<string, unknown>
     const to = safeString(data.to, 40)
     const sdp = safeString(data.sdp, 20000)
-    if (to && sdp) io.to(to).emit('rtc:offer', { from: socket.id, sdp })
+    if (currentRoom && rooms.get(currentRoom)?.peers.has(socket.id) && to !== socket.id && rooms.get(currentRoom)?.peers.has(to) && sdp) io.to(to).emit('rtc:offer', { from: socket.id, sdp })
   })
 
   socket.on('rtc:answer', (raw: unknown) => {
@@ -518,20 +528,20 @@ io.on('connection', (socket: Socket) => {
     const data = (raw ?? {}) as Record<string, unknown>
     const to = safeString(data.to, 40)
     const sdp = safeString(data.sdp, 20000)
-    if (to && sdp) io.to(to).emit('rtc:answer', { from: socket.id, sdp })
+    if (currentRoom && rooms.get(currentRoom)?.peers.has(socket.id) && to !== socket.id && rooms.get(currentRoom)?.peers.has(to) && sdp) io.to(to).emit('rtc:answer', { from: socket.id, sdp })
   })
 
   socket.on('rtc:ice', (raw: unknown) => {
     if (!allow(`${socket.id}:rtc`, 240, 10_000)) return
     const data = (raw ?? {}) as Record<string, unknown>
     const to = safeString(data.to, 40)
-    if (to) socket.to(to).emit('rtc:ice', { from: socket.id, candidate: data.candidate })
+    if (currentRoom && rooms.get(currentRoom)?.peers.has(socket.id) && to !== socket.id && rooms.get(currentRoom)?.peers.has(to)) socket.to(to).emit('rtc:ice', { from: socket.id, candidate: data.candidate })
   })
 
   // ---- Chat (kilobytes of text, relayed) ----
 
   socket.on('chat:message', (raw: unknown) => {
-    if (!currentRoom || !peer) return
+    if (!currentRoom || !peer || !rooms.get(currentRoom)?.peers.has(socket.id)) return
     if (!allow(`${socket.id}:chat`, 25, 10_000)) return
     const data = (raw ?? {}) as Record<string, unknown>
     const text = safeString(data.text, 500).trim()
@@ -554,6 +564,15 @@ io.on('connection', (socket: Socket) => {
       ...(replyTo ? { replyTo } : {}),
     }
     io.to(currentRoom).emit('chat:message', msg)
+    socket.emit('chat:sent', { id: msg.id })
+  })
+
+  socket.on('chat:typing', (raw: unknown) => {
+    if (!currentRoom || !peer || !rooms.get(currentRoom)?.peers.has(socket.id)) return
+    if (!allow(`${socket.id}:chat-typing`, 8, 5_000)) return
+    const data = (raw ?? {}) as Record<string, unknown>
+    const typing = data.typing === true
+    socket.to(currentRoom).emit('chat:typing', { peerId: socket.id, name: peer.name, typing })
   })
 
   socket.on('disconnect', () => {

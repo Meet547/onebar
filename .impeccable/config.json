@@ -1,0 +1,14 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "bounce-easing",
+        "value": "pico-typing-bounce",
+        "createdAt": "2026-11-19T18:09:47.693Z",
+        "reason": "False positive: typing indicator uses a smooth cubic ease-out, not bounce easing; its existing keyframe name describes the subtle vertical pulse."
+      }
+    ]
+  }
+}

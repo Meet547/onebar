@@ -1,5 +1,6 @@
 import type { NextConfig } from "next";
 import fs from "node:fs";
+import { execSync } from "node:child_process";
 
 // Deployment version: PICO_VERSION env when set, else the git short hash of
 // the build context, else package.json's version — with a loud warning on
@@ -18,8 +19,7 @@ const pkgVersion = (JSON.parse(
 let PICO_VERSION = process.env.PICO_VERSION || "";
 if (!PICO_VERSION) {
   try {
-    PICO_VERSION = require("node:child_process")
-      .execSync("git rev-parse --short HEAD", { stdio: ["ignore", "pipe", "ignore"] })
+    PICO_VERSION = execSync("git rev-parse --short HEAD", { stdio: ["ignore", "pipe", "ignore"] })
       .toString()
       .trim();
   } catch {
@@ -39,6 +39,7 @@ const nextConfig: NextConfig = {
   env: { NEXT_PUBLIC_PICO_VERSION: PICO_VERSION },
   // src/instrumentation.ts keeps the signaling relay alive (see that file).
   output: "standalone",
+  poweredByHeader: false,
   // The signaling relay is embedded in the Next.js server process (see
   // src/lib/relay-server.ts). Keeping socket.io external makes output file
   // tracing copy it into .next/standalone/node_modules, so the production
@@ -74,9 +75,14 @@ const nextConfig: NextConfig = {
   allowedDevOrigins: ["*.space-z.ai"],
   async headers() {
     return [
+      { source: "/sw.js", headers: [{ key: "Cache-Control", value: "no-cache, no-store, must-revalidate" }] },
       {
         source: "/(.*)",
         headers: [
+          ...(process.env.NODE_ENV === "production" ? [{
+            key: "Content-Security-Policy",
+            value: "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' ws: wss: stun: turn: turns:; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+          }] : []),
           // Clickjacking — the call UI must never be embedded by another site.
           { key: "X-Frame-Options", value: "DENY" },
           { key: "X-Content-Type-Options", value: "nosniff" },
