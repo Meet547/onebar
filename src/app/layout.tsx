@@ -9,8 +9,12 @@ const manrope = Manrope({ subsets: ["latin"], display: "swap", variable: "--font
 const DESCRIPTION =
   "Peer-to-peer video calling that sips data, battery and CPU. Built to work on a single bar of signal. No accounts, no downloads, nothing recorded.";
 
+const siteUrl =
+  process.env.NEXT_PUBLIC_SITE_URL ??
+  (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000");
+
 export const metadata: Metadata = {
-  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"),
+  metadataBase: new URL(siteUrl),
   title: TITLE,
   description: DESCRIPTION,
   keywords: ["video call", "p2p", "webrtc", "lightweight", "low bandwidth", "meeting"],
