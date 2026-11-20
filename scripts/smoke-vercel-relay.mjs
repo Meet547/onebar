@@ -14,6 +14,7 @@ function client() {
   let nextAck = 1
   ws.addEventListener('message', (event) => {
     const packet = JSON.parse(String(event.data))
+    if (process.env.DEBUG_RELAY) console.log('recv', packet.event, packet.ackId ?? '')
     if (packet.event === 'ack') {
       const resolve = acks.get(packet.ackId)
       acks.delete(packet.ackId)
@@ -40,8 +41,14 @@ function client() {
         this.on(event, listener)
       })
     },
-    emit(event, data) {
+    emit(event, data, acknowledge = false) {
+      if (!acknowledge) {
+        if (process.env.DEBUG_RELAY) console.log('send', event)
+        ws.send(JSON.stringify({ event, data }))
+        return Promise.resolve(undefined)
+      }
       const ackId = nextAck++
+      if (process.env.DEBUG_RELAY) console.log('send', event, ackId)
       const ack = new Promise((resolve, reject) => {
         const timer = setTimeout(() => { acks.delete(ackId); reject(new Error(`Timed out waiting for ${event} ack`)) }, 10_000)
         acks.set(ackId, (value) => { clearTimeout(timer); resolve(value) })
@@ -59,11 +66,11 @@ try {
   const secondConnected = second.once('connect')
   await Promise.all([firstConnected, secondConnected])
 
-  const firstJoin = await first.emit('room:join', { roomId: room, name: 'Smoke Alice' })
+  const firstJoin = await first.emit('room:join', { roomId: room, name: 'Smoke Alice' }, true)
   if (!firstJoin.ok) throw new Error(`first join failed: ${firstJoin.reason}`)
 
-  const peerJoined = second.once('peer:joined')
-  const secondJoin = await second.emit('room:join', { roomId: room, name: 'Smoke Bob' })
+  const peerJoined = first.once('peer:joined')
+  const secondJoin = await second.emit('room:join', { roomId: room, name: 'Smoke Bob' }, true)
   if (!secondJoin.ok || secondJoin.peers?.length !== 2) throw new Error('second join did not see both room peers')
   const joined = await peerJoined
   if (joined.peer.id !== secondJoin.self.id) throw new Error('peer join event did not reach the other client')
@@ -87,3 +94,14 @@ try {
   first.ws.close()
   second.ws.close()
 }
+
+const cleanupDeadline = Date.now() + 10_000
+let cleanedUp = false
+while (Date.now() < cleanupDeadline) {
+  const response = await fetch(new URL(`/api/room-info?room=${encodeURIComponent(room)}`, httpBase), { cache: 'no-store' })
+  const info = await response.json()
+  if (response.ok && info.count === 0) { cleanedUp = true; break }
+  await new Promise((resolve) => setTimeout(resolve, 300))
+}
+if (!cleanedUp) throw new Error('room membership was not cleared after both clients disconnected')
+console.log('PASS: room membership is cleaned up after disconnect')
