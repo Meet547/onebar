@@ -2,8 +2,8 @@ import type { NextConfig } from "next";
 import fs from "node:fs";
 import { execSync } from "node:child_process";
 
-// Deployment version: PICO_VERSION env when set, else the git short hash of
-// the build context, else package.json's version — with a loud warning on
+// Deployment version: explicit PICO_VERSION, Vercel's unique deployment URL,
+// the git short hash of the build context, then package.json's version — with a loud warning on
 // that last fallback (keep the order in sync with src/lib/server-version.ts,
 // which re-resolves the SAME value at runtime; Docker builds pin it via a
 // .pico-version stamp written by Dockerfile.standalone, so an image without
@@ -16,7 +16,7 @@ const pkgVersion = (JSON.parse(
   fs.readFileSync(new URL("./package.json", import.meta.url), "utf8"),
 ) as { version?: string }).version;
 
-let PICO_VERSION = process.env.PICO_VERSION || "";
+let PICO_VERSION = process.env.PICO_VERSION || process.env.VERCEL_URL || "";
 if (!PICO_VERSION) {
   try {
     PICO_VERSION = execSync("git rev-parse --short HEAD", { stdio: ["ignore", "pipe", "ignore"] })

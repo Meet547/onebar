@@ -6,11 +6,12 @@ import { execSync } from 'node:child_process'
  * next.config.ts (x-pico-version header + NEXT_PUBLIC_PICO_VERSION inline).
  * Resolution order (keep in sync with next.config.ts):
  *   1. PICO_VERSION env (explicit deploy override),
- *   2. .pico-version file (written by Dockerfile.standalone at build time —
+ *   2. VERCEL_URL (deployment-specific build/runtime identity on Vercel),
+ *   3. .pico-version file (written by Dockerfile.standalone at build time —
  *      the git short hash of the build context — so a runtime image without
  *      git still reports the exact version the client bundle was built with),
- *   3. `git rev-parse --short HEAD` (repo checkouts, dev),
- *   4. package.json version, with a LOUD warning: a fallback here means the
+ *   4. `git rev-parse --short HEAD` (repo checkouts, dev),
+ *   5. package.json version, with a LOUD warning: a fallback here means the
  *      version is not per-deploy unique and the socket version handshake /
  *      service-worker pruning degrade to best-effort. check-live.sh flags it.
  */
@@ -20,6 +21,7 @@ export function resolvePicoVersion(): string | null {
   if (cached !== undefined) return cached
   const env = process.env.PICO_VERSION
   if (env) return (cached = env)
+  if (process.env.VERCEL_URL) return (cached = process.env.VERCEL_URL)
   try {
     const fromFile = readFileSync('.pico-version', 'utf8').trim()
     if (fromFile) return (cached = fromFile)
