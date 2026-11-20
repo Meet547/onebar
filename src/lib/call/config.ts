@@ -23,3 +23,5 @@ export const SIGNALING_URL = process.env.NEXT_PUBLIC_SIGNALING_URL || ""
 export const SOCKET_PATH = process.env.NEXT_PUBLIC_SOCKET_PATH || "/signal/"
 
 export const ROOM_INFO_URL = process.env.NEXT_PUBLIC_ROOM_INFO_URL || "/info"
+
+export const SIGNALING_TRANSPORT = process.env.NEXT_PUBLIC_SIGNALING_TRANSPORT || "socket.io"

@@ -1,8 +1,9 @@
 'use client'
 
 import { io, type Socket } from 'socket.io-client'
+import { SignalingSocket } from './signaling-socket'
 import { toast } from 'sonner'
-import { SIGNALING_URL, SOCKET_PATH } from './config'
+import { SIGNALING_TRANSPORT, SIGNALING_URL, SOCKET_PATH } from './config'
 import { useCallStore, setStream as putStream } from './store'
 import { createTestStream, createTestScreenStream } from './test-stream'
 import { clearAllAudio, trackAudio } from './audio-levels'
@@ -296,7 +297,7 @@ function setSenderMaxBitrate(sender: RTCRtpSender | undefined, bps: number) {
 /* ------------------------------------------------------------------ */
 
 export class CallEngine {
-  private socket: Socket | null = null
+  private socket: SignalingSocket | Socket | null = null
   private roomId = ''
   private myId = ''
   private localStream: MediaStream | null = null
@@ -380,7 +381,7 @@ export class CallEngine {
    * this handshake even starts. If it still fails, start() retries once
    * before surfacing an error — a transient outage never becomes a dead end.
    */
-  private async connectSignaling(forceIce: boolean): Promise<Socket> {
+  private async connectSignaling(forceIce: boolean): Promise<SignalingSocket | Socket> {
     this.iceServers = await fetchIceServers(forceIce)
     const opts = {
       path: SOCKET_PATH,
@@ -392,10 +393,17 @@ export class CallEngine {
       reconnectionDelayMax: 4000,
       timeout: 10000,
     }
-    // Empty SIGNALING_URL = connect to the origin the page was loaded from —
-    // preview proxy, gateway or direct, they all serve the app, so they all
-    // serve signaling too (Next rewrites /signal/* to the relay).
-    const socket = SIGNALING_URL ? io(SIGNALING_URL, opts) : io(opts)
+    const socketOrigin = SIGNALING_URL
+      ? new URL(SIGNALING_URL, window.location.href)
+      : new URL(window.location.href)
+    socketOrigin.protocol = socketOrigin.protocol === 'https:' ? 'wss:' : 'ws:'
+    socketOrigin.pathname = SOCKET_PATH
+    socketOrigin.search = ''
+    const socket: SignalingSocket | Socket = SIGNALING_TRANSPORT === 'vercel-ws'
+      ? new SignalingSocket(socketOrigin.toString())
+      : SIGNALING_URL
+        ? io(SIGNALING_URL, opts)
+        : io(opts)
     this.socket = socket
     // Dev/debug handle (harmless in prod, invaluable for live diagnostics)
     if (typeof window !== 'undefined') {
@@ -453,7 +461,7 @@ export class CallEngine {
    * and waits for it to listen before replying — so a cold or flapping relay
    * is healed mid-join instead of surfacing an error to the user.
    */
-  private async connectWithRetry(): Promise<Socket> {
+  private async connectWithRetry(): Promise<SignalingSocket | Socket> {
     let lastErr: unknown
     for (let attempt = 0; attempt < 4; attempt++) {
       try {
@@ -499,7 +507,7 @@ export class CallEngine {
     // socket is genuinely connected. A relay lost to a recycled box / dev
     // restart heals right here — the retry loop nudges the keeper server-side
     // on every attempt, so a transient outage never becomes a dead end.
-    let socket: Socket
+    let socket: SignalingSocket | Socket
     try {
       socket = await this.connectWithRetry()
     } catch {

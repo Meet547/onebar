@@ -36,7 +36,16 @@ if (!PICO_VERSION) {
 }
 
 const nextConfig: NextConfig = {
-  env: { NEXT_PUBLIC_PICO_VERSION: PICO_VERSION },
+  env: {
+    NEXT_PUBLIC_PICO_VERSION: PICO_VERSION,
+    NEXT_PUBLIC_SIGNALING_TRANSPORT: process.env.VERCEL ? "vercel-ws" : "socket.io",
+    NEXT_PUBLIC_SOCKET_PATH: process.env.VERCEL
+      ? "/api/signal"
+      : process.env.NEXT_PUBLIC_SOCKET_PATH || "/signal/",
+    NEXT_PUBLIC_ROOM_INFO_URL: process.env.VERCEL
+      ? "/api/room-info"
+      : process.env.NEXT_PUBLIC_ROOM_INFO_URL || "/info",
+  },
   // src/instrumentation.ts keeps the signaling relay alive (see that file).
   output: "standalone",
   poweredByHeader: false,

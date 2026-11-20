@@ -56,7 +56,9 @@ export async function GET() {
   // No-op (a ~1ms TCP probe) when it is already healthy; disabled in the
   // Docker production stack via PICO_EMBEDDED_RELAY=0.
   const relayUp =
-    process.env.PICO_EMBEDDED_RELAY !== '0' ? await ensureRelayAlive(8_000) : true
+    process.env.VERCEL || process.env.PICO_EMBEDDED_RELAY === '0'
+      ? true
+      : await ensureRelayAlive(8_000)
 
   if (!relayUp) {
     return NextResponse.json(
