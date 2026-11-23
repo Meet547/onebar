@@ -1,6 +1,6 @@
 # Pico — full production stack: app + signaling + TURN relay + TLS gateway.
 #
-#   cp .env.example .env   (fill in PICO_DOMAIN, TURN_SECRET, TURN_PUBLIC_IP…)
+#   cp deploy/.env.example .env   (fill in PICO_DOMAIN, TURN_SECRET, TURN_PUBLIC_IP…)
 #   docker compose up -d --build
 #
 # Services

@@ -88,7 +88,7 @@ The manual four steps below are exactly what the script automates.
 
 ```bash
 git clone <your-repo> pico && cd pico
-cp .env.example .env
+cp deploy/.env.example .env
 ```
 
 Fill in `.env`:
